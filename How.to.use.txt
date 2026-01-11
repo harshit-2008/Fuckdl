@@ -1,63 +1,66 @@
+QUICK START GUIDE
+=================
+
+For complete documentation with all examples, see: HOW_TO_USE.md
+
+INSTALLATION:
+-------------
 1. Install python 3.9.xx - 3.14.xx, be sure to add python to PATH while installing it.
 
-2. Install Microsoft Visual C++ Redistributable.
+2. Install Microsoft Visual C++ Redistributable:
+   https://aka.ms/vs/17/release/vc_redist.x64.exe
 
-https://aka.ms/vs/17/release/vc_redist.x64.exe
+3. Run: poetry install
 
-3. Run install.bat.
+4. Install Firefox add-on for cookies:
+   https://addons.mozilla.org/en-US/firefox/addon/cookies-txt-one-click/
 
-4. Install this Firefox add-on
+COOKIES SETUP:
+--------------
+Export cookies and save as default.txt in:
+- HBO Max: fuckdl\cookies\HBOMax\default.txt
+- Amazon: fuckdl\cookies\Amazon\default.txt
+- Apple TV Plus: fuckdl\cookies\AppleTVPlus\default.txt
+- iTunes: fuckdl\cookies\iTunes\default.txt
+- Netflix: fuckdl\cookies\Netflix\default.txt
+- And so on for other services...
 
-https://addons.mozilla.org/en-US/firefox/addon/cookies-txt-one-click/
+CREDENTIALS:
+------------
+For DisneyPlus, Videoland, ParamountPlus, All4, RakutenTV, BritBox:
+Add credentials in fuckdl\config\fuckdl.yml
 
-and go to hbomax.com and download the cookies, rename the file to default.txt and put it in
+QUICK EXAMPLES:
+---------------
+# Amazon Prime Video - Single episode
+poetry run fuckdl dl -al en -sl en -w S01E01 Amazon https://www.primevideo.com/region/eu/detail/0KRGHGZCHKS920ZQGY5LBRF7MA/
 
-fuckdl\Cookies\HBOMax
+# Amazon Prime Video - Entire season
+poetry run fuckdl dl -al en -sl en -w S01 Amazon https://www.primevideo.com/region/eu/detail/0KRGHGZCHKS920ZQGY5LBRF7MA/
 
-For Amazon go to primevideo.com or amazon.com and download the cookies, rename the file to default.txt and put it in
+# iTunes - Download movie/show
+poetry run fuckdl dl -al tr -sl tr iTunes -m umc.cmc.2lj6d47e7094s6ss83j0uppdm
 
-fuckdl\Cookies\Amazon
+# iTunes - 4K HDR
+poetry run fuckdl dl -al en -sl en -v H265 -r HDR iTunes -m umc.cmc.2lj6d47e7094s6ss83j0uppdm
 
-For AppleTVPlus go to tv.apple.com and download the cookies, rename the file to default.txt and put it in
+# Apple TV Plus
+poetry run fuckdl dl -al en -sl en -w S01E01 AppleTVPlus https://tv.apple.com/us/show/big-beasts/umc.cmc.7d9yulmth1rvkwpij477qsqsk
 
-fuckdl\Cookies\AppleTVPlus
+HELP:
+-----
+# General help
+poetry run fuckdl dl --help
 
-For iTunes go to tv.apple.com or music.apple.com and download the cookies, rename the file to default.txt and put it in
+# Service-specific help
+poetry run fuckdl dl Amazon --help
 
-fuckdl\Cookies\iTunes
+CDM DEVICES:
+------------
+For SL2000/SL3000 devices:
+1. Create folder in fuckdl\devices\
+2. Add bgroupcert.dat and zgpriv.dat
+3. Edit fuckdl.yml to add folder name
+4. FuckDL will auto-create PRD files and reprovision hourly
 
-5. For the services that need credentials like DisneyPlus, Videoland, ParamountPlus, All4, RakutenTV and BritBox add the credentials in \fuckdl\fuckdl.yml, edit the file with notepad++.
-
-5. For downloading the video of an episode from primevideo.com use
-
-poetry run vt dl -al en -sl en -w S01E1 Amazon https://www.primevideo.com/region/eu/detail/0KRGHGZCHKS920ZQGY5LBRF7MA/
-
- 
-If you want to downlod the video for a specific seasons use
-
-poetry run vt dl -al en -sl en -w S01 Amazon https://www.primevideo.com/region/eu/detail/0KRGHGZCHKS920ZQGY5LBRF7MA/
-
-6. For downloading from iTunes use
-
-poetry run vt dl -al tr -sl tr iTunes -m umc.cmc.2lj6d47e7094s6ss83j0uppdm
-
-to download in 4k use -v h265 or -r hdr or -r dv, to download in sd use -q sd
-
-For downloading from AppleTVPlus use
-
-poetry run vt dl -al en -sl en -w S01E01 AppleTVPlus https://tv.apple.com/us/show/big-beasts/umc.cmc.7d9yulmth1rvkwpij477qsqsk
-
-
-for more options use
-
-poetry run vt dl -h
-
-for the extra options in the services use
-
-poetry run vt dl Amazon -h
-
-instead of Amazon add the service name
-
-the extra options will be added after the service name
-
-7. Make a folder for the SL2000 or SL3000 in \fuckdl\devices and add in it bgroupcert.dat and zgpriv.dat and edit fuckdl.yml for adding the name of the folder, fuckdl will create prd file and reprovisioning it every an hour.
+For complete documentation with all options and examples, see: HOW_TO_USE.md
