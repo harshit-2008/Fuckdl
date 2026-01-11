@@ -18,6 +18,7 @@ downloader:
 
 cdm:
   default: 'generic_8159_l3'
+  Amazon: 'hisense_smarttv_hu32e5600fhwv_SL3000'
 
 cdm_api: []
 
