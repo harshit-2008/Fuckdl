@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+fuckdl/logs/*.log
+fuckdl/cache/
+fuckdl/key_store.db
+*.wvd
+*.prd
+*.mp4
+*.mkv
+*.m4a
+*.m4v
+temp/
+downloads/
+
+# Sensitive files
+fuckdl/cookies/**/*.txt
+fuckdl/devices/**/*.dat
+fuckdl/devices/**/*.wvd
+fuckdl/devices/**/*.prd
+fuckdl/config/fuckdl.yml
+
+# Build files
+*.bat
+build_encrypted.py
+.pyarmor.cfg
+
+# Binaries (optional - uncomment if you don't want to track binaries)
+# binaries/
