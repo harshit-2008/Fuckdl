@@ -196,7 +196,7 @@ class Amazon(BaseService):
            self.event = True
 
         if data["pageContext"]["subPageType"] == "Movie" or data["pageContext"]["subPageType"] == "Event":
-            card = res["productDetails"]["detail"]
+            card = data["productDetails"]["detail"]
             titles.append(Title(
                 id_=card["catalogId"],
                 type_=Title.Types.MOVIE,
@@ -259,7 +259,7 @@ class Amazon(BaseService):
                     raise self.log.exit("Unable to get seasons")
                 
                 seasons = list(seasons_data.values())[0]
-                
+               
                 for season in seasons:
                     seasonLink = season["seasonLink"]
                     match = re.search(r"/detail/([A-Z0-9]{10,})/", seasonLink)
@@ -271,6 +271,7 @@ class Amazon(BaseService):
                     episodes_titles = self.get_episodes(titleID)
 
                     titles_.extend(episodes_titles)
+
             else:
                 episodes_titles = self.get_episodes(self.title)
                 titles_.extend(episodes_titles)
@@ -302,7 +303,7 @@ class Amazon(BaseService):
             if season_episode_count[key] < 1:
                 filtered_titles.append(title)
                 season_episode_count[key] += 1
-
+        
         titles = filtered_titles
 
         return titles
@@ -503,11 +504,7 @@ class Amazon(BaseService):
                     need_separate_audio = True
                     break
 
-        # If we need separate audio manifests (or user requested --atmos),
-        # try fetching higher-bitrate audio manifests (e.g. CVBR/H265) so
-        # that when --atmos is used we can still obtain non-Atmos audio
-        # tracks at 640kbps if available.
-        if need_separate_audio or self.atmos:
+        if need_separate_audio and not self.atmos:
             manifest_type = self.amanifest or "CVBR"
             self.log.info(f"Getting audio from {manifest_type} manifest for potential higher bitrate or better codec")
             audio_manifest = self.get_manifest(
@@ -638,18 +635,7 @@ class Amazon(BaseService):
                     self.log.warning(f" - Title has no UHD stream, cannot get higher quality audio")
                 else:
                     if any(x for x in uhd_audio_mpd.audios if x.atmos):
-                        # Instead of replacing all audio tracks with the UHD manifest's
-                        # tracks (which may only contain Atmos), merge Atmos tracks with
-                        # existing audio tracks so we keep other high-bitrate (640kbps)
-                        # audio tracks (added above) while still including Atmos.
-                        atmos_tracks = [x for x in uhd_audio_mpd.audios if x.atmos]
-                        # Start with existing audios and add Atmos tracks if missing
-                        existing = list(tracks.audios)
-                        for a in atmos_tracks:
-                            # avoid exact object duplicates
-                            if not any((ea.language == a.language and (ea.bitrate or 0) == (a.bitrate or 0) and getattr(ea, 'atmos', False) == getattr(a, 'atmos', False)) for ea in existing):
-                                existing.append(a)
-                        tracks.audios = existing
+                        tracks.audios = uhd_audio_mpd.audios
 
         # Audio metadata processing
         for audio in tracks.audios:
@@ -674,40 +660,7 @@ class Amazon(BaseService):
             key = (audio.language, audio.bitrate, audio.descriptive)
             if key not in unique_audio_tracks:
                 unique_audio_tracks[key] = audio
-        tracks.audios = list(unique_audio_tracks.values())
-
-        # If user requested Atmos, prefer including a non-Atmos audio track
-        # at >=640 kb/s per language (if available), while still including
-        # Atmos tracks. This ensures we don't end up with only a low-bitrate
-        # Atmos track and miss higher-bitrate non-Atmos alternatives.
-        if self.atmos and tracks.audios:
-            from collections import defaultdict as _dd
-            grouped = _dd(list)
-            for a in tracks.audios:
-                grouped[a.language].append(a)
-
-            selected = []
-            for lang, group in grouped.items():
-                # find non-atmos candidates >=640kbps
-                non_atmos_high = [x for x in group if not getattr(x, 'atmos', False) and (getattr(x, 'bitrate', 0) or 0) >= 640000]
-                if non_atmos_high:
-                    best_non_atmos = max(non_atmos_high, key=lambda x: getattr(x, 'bitrate', 0) or 0)
-                else:
-                    non_atmos_any = [x for x in group if not getattr(x, 'atmos', False)]
-                    best_non_atmos = max(non_atmos_any, key=lambda x: getattr(x, 'bitrate', 0) or 0) if non_atmos_any else None
-
-                # include best non-atmos (if any)
-                if best_non_atmos:
-                    selected.append(best_non_atmos)
-
-                # include all atmos tracks for this language (avoid duplicates)
-                for a in group:
-                    if getattr(a, 'atmos', False):
-                        if not any((sa.language == a.language and (sa.bitrate or 0) == (a.bitrate or 0) and getattr(sa, 'atmos', False) == getattr(a, 'atmos', False)) for sa in selected):
-                            selected.append(a)
-
-            if selected:
-                tracks.audios = selected
+        tracks.audios = list(unique_audio_tracks.values())   
         
         # Subtitle processing
         if not hybrid_mode:
@@ -1611,15 +1564,16 @@ class Amazon(BaseService):
             except:
                 continue
 
-            product_details = res["productDetails"]["detail"]
+            product_details = res.get("productDetails", {}).get("detail", {})
             season_number = product_details.get("seasonNumber", 1)
 
             # Process initial episodes
+            batch = []
             episodes_titles = []
             for episode in episodes:
                 details = episode["detail"]
                 episodes_titles.append(details["catalogId"])
-                titles.append(
+                batch.append(
                     Title(
                         id_=details["catalogId"],
                         type_=Title.Types.TV,
@@ -1629,17 +1583,17 @@ class Amazon(BaseService):
                         episode_name=details["title"],
                         original_lang=None,
                         source=self.ALIASES[0],
-                        service_data=episode,
+                        service_data=details,
                     )
                 )
 
             # Get playback info for initial batch
             playbackEnvelope_info = self.playbackEnvelope_data(episodes_titles)
-            for title in titles:
+            for title in batch:
                 for playbackInfo in playbackEnvelope_info:
                     if title.id == playbackInfo["titleID"]:
                         title.service_data.update({"playbackInfo": playbackInfo})
-                        titles_.append(title)
+                    titles_.append(title)
 
             # Handle pagination if there are more episodes
             pagination_data = episode_list_data.get('actions', {}).get('pagination', [])
@@ -1702,7 +1656,7 @@ class Amazon(BaseService):
                 # Get next page token
                 pagination_data = episodeList.get('actions', {}).get('pagination', [])
                 token = next((item.get('token') for item in pagination_data if item.get('tokenType') == 'NextPage'), None)
-                
+
         return titles_
 
     @staticmethod
@@ -2008,3 +1962,4 @@ class Amazon(BaseService):
             if "error" in res:
                 raise self.log.exit(f"Unable to get code pair: {res['error_description']} [{res['error']}]")
             return res
+

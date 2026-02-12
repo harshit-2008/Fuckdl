@@ -75,3 +75,4 @@ class SSLCiphers(HTTPAdapter):
     def proxy_manager_for(self, *args, **kwargs):
         kwargs["ssl_context"] = self._ssl_context
         return super().proxy_manager_for(*args, **kwargs)
+

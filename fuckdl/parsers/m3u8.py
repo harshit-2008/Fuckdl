@@ -61,7 +61,6 @@ def parse(master, source=None):
             id_=md5(str(x).encode()).hexdigest()[0:7],  # 7 chars only for filename length
             source=source,
             url=("" if re.match("^https?://", x.uri) else x.base_uri) + x.uri,
-            rawurl=("" if re.match("^https?://", x.uri) else x.base_uri) + x.uri,
             # metadata
             codec=x.stream_info.codecs.split(",")[0].split(".")[0],  # first codec may not be for the video
             language=None,  # playlists don't state the language, fallback must be used
@@ -87,7 +86,6 @@ def parse(master, source=None):
             id_=md5(str(x).encode()).hexdigest()[0:6],
             source=source,
             url=("" if re.match("^https?://", x.uri) else x.base_uri) + x.uri,
-            rawurl=("" if re.match("^https?://", x.uri) else x.base_uri) + x.uri,
             # metadata
             codec=x.group_id.replace("audio-", "").split("-")[0].split(".")[0],
             language=x.language,
@@ -109,7 +107,6 @@ def parse(master, source=None):
             id_=md5(str(x).encode()).hexdigest()[0:6],
             source=source,
             url=("" if re.match("^https?://", x.uri) else x.base_uri) + x.uri,
-            rawurl=("" if re.match("^https?://", x.uri) else x.base_uri) + x.uri,
             # metadata
             codec="vtt",  # assuming VTT, codec info isn't shown
             language=x.language,
@@ -121,3 +118,4 @@ def parse(master, source=None):
             extra=x
         ) for x in master.media if x.type == "SUBTITLES"]
     )
+

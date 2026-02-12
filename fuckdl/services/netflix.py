@@ -5,7 +5,7 @@ import re
 import sys
 import time
 from datetime import timedelta
-from uuid import UUID
+from uuid import UUID                     
 
 import click
 import jsonpickle
@@ -52,7 +52,7 @@ class Netflix(BaseService):
     ALIASES = ["NF", "netflix"]
     TITLE_RE = [
         r"^(?:https?://(?:www\.)?netflix\.com(?:/[a-z0-9]{2})?/(?:title/|watch/|.+jbv=))?(?P<id>\d+)",
-        r"^https?://(?:www\.)?unogs\.com/(?:movie|series)/(?P<id>\d+)",
+        r"^https?://(?:www\.)?unogs\.com/title/(?P<id>\d+)",
     ]
 
     NF_LANG_MAP = {
@@ -65,7 +65,7 @@ class Netflix(BaseService):
     @click.argument("title", type=str, required=False)
     @click.option("-drm", "--drm-system", type=click.Choice(["widevine", "playready"], case_sensitive=False),
                   default="widevine",
-                  help="which drm system to use")  
+                  help="which drm system to use")
     @click.option("-p", "--profile", type=click.Choice(["MPL", "HPL", "QC", "MPL+HPL", "MPL+HPL+QC", "MPL+QC"], case_sensitive=False),
                   default="MPL+HPL+QC",
                   help="H.264 profile to use. Default is best available.")
@@ -81,7 +81,7 @@ class Netflix(BaseService):
         self.profile = profile
         self.meta_lang = meta_lang
         self.single = single
-        self.drm_system = drm_system 
+        self.drm_system = drm_system
 
         if ctx.parent.params["proxy"] and len("".join(i for i in ctx.parent.params["proxy"] if not i.isdigit())) == 2:
             self.GEOFENCE.append(ctx.parent.params["proxy"])
@@ -99,9 +99,6 @@ class Netflix(BaseService):
         # General
         self.download_proxied = len(self.GEOFENCE) > 0  # needed if the title is unavailable at home IP
         self.profiles = []
-        self.manifest_challenge_file = "nf_challenge.json"
-        self.manifest_challenge_ttl = 6 * 60 * 60  # 6 hours. Change if expires soon.
-        self.manifest_challenge_request_host = "https://manifest-challenge.decryptlabs.com/get-netflix-challenge"
 
         # MSL
         self.msl = None
@@ -118,7 +115,6 @@ class Netflix(BaseService):
 
     def get_titles(self):
         metadata = self.get_metadata(self.title)["video"]
-        #self.log.info(metadata)
         if metadata["type"] == "movie" or self.single:
             titles = [Title(
                 id_=self.title,
@@ -154,9 +150,6 @@ class Netflix(BaseService):
         return titles
 
     def get_tracks(self, title):
-        # Check if we're in HYBRID mode
-        is_hybrid = self.range and self.range.upper() in ("DVHDR", "HDRDV", "HYBRID")
-        
         if self.vcodec == "H264":
             # If H.264, get both MPL and HPL tracks as they alternate in terms of bitrate
             tracks = Tracks()
@@ -178,11 +171,19 @@ class Netflix(BaseService):
                 manifest_tracks = self.manifest_as_tracks(manifest)
                 license_url = manifest["links"]["license"]["href"]
 
+
                 if self.cdm.device.security_level == 3 and self.cdm.device.type == LocalDevice.Types.CHROME:
                     max_quality = max(x.height for x in manifest_tracks.videos)
+                    #if profile == "MPL" and max_quality >= 720:
+                    #    manifest_sd = self.get_manifest(title, self.config["profiles"]["video"]["H264"]["BPL"])
+                    #    license_url_sd = manifest_sd["links"]["license"]["href"]
+                    #    if "SD_LADDER" in manifest_sd["video_tracks"][0]["streams"][0]["tags"]:
+                    #        # SD manifest is new encode encrypted with different keys that won't work for HD
+                    #        continue
+                    #    license_url = license_url_sd
                     if profile == "HPL" and max_quality >= 1080:
                         if "SEGMENT_MAP_2KEY" in manifest["video_tracks"][0]["streams"][0]["tags"]:
-                            # 1080p license restricted from Android L3, 720p license will work for 1080p
+                        # 1080p license restricted from Android L3, 720p license will work for 1080p
                             manifest_720 = self.get_manifest(
                                 title, [x for x in self.config["profiles"]["video"]["H264"]["HPL"] if "l40" not in x]
                             )
@@ -194,77 +195,26 @@ class Netflix(BaseService):
                 for track in manifest_tracks:
                     if track.encrypted:
                         track.extra["license_url"] = license_url
+                        # Fix PSSH with correct KID
+                        #track.pssh.init_data = b'\x08\x01\x12\x10' + bytes.fromhex(track.kid)
                 tracks.add(manifest_tracks, warn_only=True)
             return tracks
         else:
-            # For HYBRID mode with H.265, we need both HDR10 and DV profiles
-            if is_hybrid and self.vcodec == "H265":
-                tracks = Tracks()
-                
-                # Get HDR10 profiles from config
-                hdr_profiles = self.config["profiles"]["video"]["H265"].get("HDR10")
-                if not hdr_profiles:
-                    raise self.log.exit(" - No HDR10 profiles found in config for hybrid mode")
-                
-                self.log.info("Fetching HDR10 manifest for hybrid mode...")
-                hdr_manifest = self.get_manifest(title, hdr_profiles)
-                hdr_tracks = self.manifest_as_tracks(hdr_manifest)
-                hdr_license_url = hdr_manifest["links"]["license"]["href"]
-                
-                # Mark HDR10 tracks
-                for track in hdr_tracks.videos:
-                    track.hdr10 = True
-                    track.dv = False
-                    if track.encrypted:
-                        track.extra["license_url"] = hdr_license_url
-                
-                tracks.add(hdr_tracks, warn_only=True)
-                
-                # Get DV profiles from config
-                dv_profiles = self.config["profiles"]["video"]["H265"].get("DV")
-                if not dv_profiles:
-                    raise self.log.exit(" - No DV profiles found in config for hybrid mode")
-                
-                self.log.info("Fetching DV manifest for hybrid mode...")
-                dv_manifest = self.get_manifest(title, dv_profiles)
-                dv_tracks = self.manifest_as_tracks(dv_manifest)
-                dv_license_url = dv_manifest["links"]["license"]["href"]
-                
-                # Mark DV tracks
-                for track in dv_tracks.videos:
-                    track.dv = True
-                    track.hdr10 = False
-                    if track.encrypted:
-                        track.extra["license_url"] = dv_license_url
-                
-                tracks.add(dv_tracks, warn_only=True)
-                
-                # Add audio and subtitles from HDR manifest (they're the same for both)
-                for track in hdr_tracks.audios:
-                    tracks.add(track, warn_only=True)
-                for track in hdr_tracks.subtitles:
-                    tracks.add(track, warn_only=True)
-                
-                return tracks
-            else:
-                # Normal non-hybrid mode
-                manifest = self.get_manifest(title, self.profiles)
-                manifest_tracks = self.manifest_as_tracks(manifest)
-                license_url = manifest["links"]["license"]["href"]
-                
-                for track in manifest_tracks:
-                    if track.encrypted:
-                        track.extra["license_url"] = license_url
-                    if isinstance(track, VideoTrack):
-                        # TODO: Needs something better than this
-                        track.hdr10 = track.codec.split("-")[1] in ["hdr", "hdr10plus"] if track.codec.startswith(("av1", "hevc", "vp9")) else False
-                        track.dv = track.codec.startswith("hevc-dv")
-                
-                return manifest_tracks
+            manifest = self.get_manifest(title, self.profiles)
+            manifest_tracks = self.manifest_as_tracks(manifest)
+            license_url = manifest["links"]["license"]["href"]
+            for track in manifest_tracks:
+                if track.encrypted:
+                    track.extra["license_url"] = license_url
+                if isinstance(track, VideoTrack):
+                    # TODO: Needs something better than this
+                    track.hdr10 = track.codec.split("-")[1] in ["hdr", "hdr10plus"] if track.codec.startswith(("av1", "hevc", "vp9")) else False
+                    track.dv = track.codec.startswith("hevc-dv")
+
+            return manifest_tracks
 
     def get_chapters(self, title):
         metadata = self.get_metadata(title.id)["video"]
-        #self.log.info(metadata)
 
         if metadata["type"] == "movie" or self.single:
             episode = metadata
@@ -345,20 +295,14 @@ class Netflix(BaseService):
         return self.config["certificate"]
 
     def license(self, challenge, track, session_id, **_):
-        challenge_b64 = base64.b64encode(challenge).decode("utf-8")
-        self.cache_manifest_challenge(challenge_b64)
-        
-        timestamp = int(time.time() * 10000)
-        if not globals().get("xid"):
-            global xid
-            xid = str(timestamp + 1610)
-        else:
-            xid = globals().get("xid")
         if not self.msl:
             raise self.log.exit(" - Cannot get license, MSL client has not been created yet.")
         header, payload_data = self.msl.send_message(
             endpoint=self.config["endpoints"]["licence"],
-            params={},
+            params={
+                "reqAttempt": 1,
+                "reqName": "license",
+            },
             application_data={
                 "version": 2,
                 "url": track.extra["license_url"],
@@ -370,8 +314,8 @@ class Netflix(BaseService):
                 "params": [{
                     "sessionId": base64.b64encode(session_id).decode("utf-8"),
                     "clientTime": int(time.time()),
-                    "challengeBase64": challenge_b64,
-                    "xid": xid,
+                    "challengeBase64": base64.b64encode(challenge).decode("utf-8"),
+                    "xid": str(int((int(time.time()) + 0.1612) * 1000)),
                 }],
                 "echo": "sessionId"
             },
@@ -449,18 +393,8 @@ class Netflix(BaseService):
         self.react_context = self.get_react_context()
 
     def get_profiles(self):
-        # Force H.265 codec for HDR/DV/HYBRID modes
-        if self.range and self.range.upper() in ("HDR10", "DV", "DVHDR", "HDRDV", "HYBRID"):
-            if self.vcodec not in ("H265", "VP9", "AV1"):
-                self.vcodec = "H265"
-        
-        # For HYBRID mode, return the base H.265 profiles (not filtered by range)
-        # We'll handle HDR10 and DV filtering in get_tracks()
-        if self.range and self.range.upper() in ("DVHDR", "HDRDV", "HYBRID"):
+        if self.range in ("HDR10", "DV") and self.vcodec not in ("H265", "VP9", "AV1"):
             self.vcodec = "H265"
-            # Return all H.265 profiles - we'll filter in get_tracks
-            return self.config["profiles"]["video"]["H265"]
-        
         profiles = self.config["profiles"]["video"][self.vcodec]
         if self.range and self.range in profiles:
             return profiles[self.range]
@@ -479,7 +413,6 @@ class Netflix(BaseService):
         """
         cache_loc = self.get_cache("web_data.json")
 
-        self.session.headers.update(self.config["headers"])
         if not os.path.isfile(cache_loc):
             src = self.session.get("https://www.netflix.com/browse").text
             match = re.search(r"netflix\.reactContext = ({.+});</script><script>window\.", src, re.MULTILINE)
@@ -487,7 +420,6 @@ class Netflix(BaseService):
                 raise self.log.exit(" - Failed to retrieve reactContext data, cookies might be outdated.")
             react_context_raw = match.group(1)
             react_context = json.loads(re.sub(r"\\x", r"\\u00", react_context_raw))["models"]
-            #self.log.info(react_context)
             react_context["requestHeaders"]["data"] = {
                 re.sub(r"\B([A-Z])", r"-\1", k): str(v) for k, v in react_context["requestHeaders"]["data"].items()
             }
@@ -497,9 +429,9 @@ class Netflix(BaseService):
             react_context["requestHeaders"]["data"] = {
                 k: str(v) for k, v in react_context["requestHeaders"]["data"].items()
             }
-            react_context["playerModel"]["data"]["config"]["core"]["initParams"]["clientVersion"] = (
-                react_context["playerModel"]["data"]["config"]["core"]["assets"]["core"].split("-")[-1][:-3]
-            )
+            #react_context["playerModel"]["data"]["config"]["core"]["initParams"]["clientVersion"] = (
+            #    react_context["playerModel"]["data"]["config"]["core"]["assets"]["core"].split("-")[-1][:-3]
+            #)
 
             os.makedirs(os.path.dirname(cache_loc), exist_ok=True)
             with open(cache_loc, "w", encoding="utf-8") as fd:
@@ -516,9 +448,90 @@ class Netflix(BaseService):
         :param title_id: Title's ID.
         :returns: Title Metadata.
         """
+
+        """
+        # Wip non-working code for the newer shakti metadata replacement
+        metadata = self.session.post(
+            url=self.config["endpoints"]["website"].format(
+                build_id=self.react_context["serverDefs"]["data"]["BUILD_IDENTIFIER"]
+            ),
+            params={
+                # features
+                "webp": self.react_context["browserInfo"]["data"]["features"]["webp"],
+                "drmSystem": self.config["configuration"]["drm_system"],
+                # truths
+                "isVolatileBillboardsEnabled": self.react_context["truths"]["data"]["volatileBillboardsEnabled"],
+                "routeAPIRequestsThroughFTL": self.react_context["truths"]["data"]["routeAPIRequestsThroughFTL"],
+                "isTop10Supported": self.react_context["truths"]["data"]["isTop10Supported"],
+                "categoryCraversEnabled": self.react_context["truths"]["data"]["categoryCraversEnabled"],
+                "hasVideoMerchInBob": self.react_context["truths"]["data"]["hasVideoMerchInBob"],
+                "persoInfoDensity": self.react_context["truths"]["data"]["enablePersoInfoDensityToggle"],
+                "contextAwareImages": self.react_context["truths"]["data"]["contextAwareImages"],
+                # ?
+                "falcor_server": "0.1.0",
+                "withSize": True,
+                "materialize": True,
+                "original_path": quote_plus(
+                    f"/shakti/{self.react_context['serverDefs']['data']['BUILD_IDENTIFIER']}/pathEvaluator"
+                )
+            },
+            headers=dict(
+                **self.react_context["abContext"]["data"]["headers"],
+                **{
+                    "X-Netflix.Client.Request.Name": "ui/falcorUnclassified",
+                    "X-Netflix.esn": self.react_context["esnGeneratorModel"]["data"]["esn"],
+                    "x-netflix.nq.stack": self.react_context["serverDefs"]["data"]["stack"],
+                    "x-netflix.request.client.user.guid": (
+                        self.react_context["memberContext"]["data"]["userInfo"]["guid"]
+                    )
+                },
+                **self.react_context["requestHeaders"]["data"]
+            ),
+            data={
+                "path": json.dumps([
+                    [
+                        "videos",
+                        70155547,
+                        [
+                            "bobSupplementalMessage",
+                            "bobSupplementalMessageIcon",
+                            "bookmarkPosition",
+                            "delivery",
+                            "displayRuntime",
+                            "evidence",
+                            "hasSensitiveMetadata",
+                            "interactiveBookmark",
+                            "maturity",
+                            "numSeasonsLabel",
+                            "promoVideo",
+                            "releaseYear",
+                            "seasonCount",
+                            "title",
+                            "userRating",
+                            "userRatingRequestId",
+                            "watched"
+                        ]
+                    ],
+                    [
+                        "videos",
+                        70155547,
+                        "seasonList",
+                        "current",
+                        "summary"
+                    ]
+                ]),
+                "authURL": self.react_context["memberContext"]["data"]["userInfo"]["authURL"]
+            }
+        )
+
+        print(metadata.headers)
+        print(metadata.text)
+        exit()
+        """
+
         try:
             metadata = self.session.get(
-                self.config["endpoints"]["metadata"],
+                self.config["endpoints"]["metadata"].format(build_id="release"),
                 params={
                     "movieid": title_id,
                     "drmSystem": self.config["configuration"]["drm_system"],
@@ -545,58 +558,6 @@ class Netflix(BaseService):
                 )
             return metadata
 
-    def cache_manifest_challenge(self, challenge: str) -> None:
-        """Save the latest challenge and the timestamp when we got it."""
-        data = {
-            "time": time.time(),
-            "challenge": challenge
-        }
-        try:
-            with open(self.manifest_challenge_file, "w") as f:
-                json.dump(data, f)
-        except OSError as e:
-            self.log.warning(f"Failed to write the Netflix manifest challenge to the file {self.manifest_challenge_file}: {e}")
-
-    def get_manifest_challenge(self) -> str:
-        """Return a cached challenge if it's <6h old, otherwise fetch a new one."""
-        challenge = None
-
-        # Try reading the manifest challenge file
-        try:
-            with open(self.manifest_challenge_file, "r") as f:
-                data = json.load(f)
-
-            cached_time = data.get("time")
-            if (time.time() - cached_time) < self.manifest_challenge_ttl:
-                challenge = data.get("challenge")
-                self.log.debug(
-                    "Using locally cached Netflix manifest challenge (not expired): %s",
-                    challenge
-                )
-        except (OSError, json.JSONDecodeError) as e:
-            self.log.debug(f"Could not read/parse cache file: {e}")
-
-        # If no valid cached challenge, fetch a new one
-        if challenge is None:
-            try:
-                resp = requests.get(
-                    self.manifest_challenge_request_host,
-                    timeout=5
-                )
-                resp.raise_for_status()
-                challenge = resp.text.strip()
-                self.log.debug("Fetched a Netflix manifest challenge from Decrypt Labs API: %s", challenge)
-                self.cache_manifest_challenge(challenge)
-            except requests.RequestException as e:
-                self.log.warning(
-                    f"Failed to fetch a Netflix manifest challenge from Decrypt Labs API: {e}"
-                )
-                challenge = self.config.get("payload_challenge")
-                self.log.debug("Using config payload_challenge: %s", challenge)
-
-        return challenge
-
-
     def get_manifest(self, title, video_profiles):
         if isinstance(video_profiles, dict):
             video_profiles = list(video_profiles.values())
@@ -616,8 +577,8 @@ class Netflix(BaseService):
             audio_profiles,
             self.config["profiles"]["subtitles"],
         ))))
-        #self.log.debug("Profiles:\n\t" + "\n\t".join(profiles))
-        
+        self.log.debug("Profiles:\n\t" + "\n\t".join(profiles))
+
         if self.drm_system == "playready":
             params = {}
             if self.cdm.device.type == LocalDevice.Types.CHROME:
@@ -627,19 +588,17 @@ class Netflix(BaseService):
                     "reqName": "manifest",
                     "clienttype": self.react_context["playerModel"]["data"]["config"]["ui"]["initParams"]["uimode"],
                     "uiversion": self.react_context["serverDefs"]["data"]["BUILD_IDENTIFIER"],
-                    "browsername": self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"][
-                        "name"],
-                    "browserversion":
-                        self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["version"],
-                    "osname":
-                        self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["os"][
-                            "name"],
-                    "osversion":
-                        self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["os"][
-                            "version"]
+                    #"browsername": self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"][
+                    #    "name"],
+                    #"browserversion":
+                    #    self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["version"],
+                    #"osname":
+                    #    self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["os"][
+                    #        "name"],
+                    #"osversion":
+                    #    self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["os"][
+                    #        "version"]
                 }
-               
-                
 
             _, payload_chunks = self.msl.send_message(
                 endpoint=self.config["endpoints"]["manifest"],
@@ -685,9 +644,6 @@ class Netflix(BaseService):
                         "isUIAutoPlay": False,
                         "isNonMember": False,
                         "challenge": self.config["payload_challenge_pr"],
-                        "supportsAdBreakHydration": True,
-                        "liveMetadataFormat":"INDEXED_SEGMENT_TEMPLATE",
-                        "liveAdsCapability":"remove",
                         # "desiredVmaf": "plus_lts",  # ?
                         # "maxSupportedLanguages": 2,  # ?
                     }
@@ -707,16 +663,16 @@ class Netflix(BaseService):
                     "reqName": "manifest",
                     "clienttype": self.react_context["playerModel"]["data"]["config"]["ui"]["initParams"]["uimode"],
                     "uiversion": self.react_context["serverDefs"]["data"]["BUILD_IDENTIFIER"],
-                    "browsername": self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"][
-                        "name"],
-                    "browserversion":
-                        self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["version"],
-                    "osname":
-                        self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["os"][
-                            "name"],
-                    "osversion":
-                        self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["os"][
-                            "version"]
+                    #"browsername": self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"][
+                    #    "name"],
+                    #"browserversion":
+                    #    self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["version"],
+                    #"osname":
+                    #    self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["os"][
+                    #        "name"],
+                    #"osversion":
+                    #    self.react_context["playerModel"]["data"]["config"]["core"]["initParams"]["browserInfo"]["os"][
+                    #        "version"]
                 }
 
             _, payload_chunks = self.msl.send_message(
@@ -761,11 +717,7 @@ class Netflix(BaseService):
                         "preferAssistiveAudio": False,
                         "isUIAutoPlay": False,
                         "isNonMember": False,
-                        #"challenge": self.get_manifest_challenge(),
                         "challenge": self.config["payload_challenge"],
-                        "supportsAdBreakHydration": True,
-                        "liveMetadataFormat":"INDEXED_SEGMENT_TEMPLATE",
-                        "liveAdsCapability":"remove",
                         # "desiredVmaf": "plus_lts",  # ?
                         # "maxSupportedLanguages": 2,  # ?
                     }
@@ -829,6 +781,7 @@ class Netflix(BaseService):
                 pssh=Box.parse(base64.b64decode(x["drmHeader"]["bytes"])) if x["isDrm"] else None,
                 kid=x.get("drmHeaderId") if x["isDrm"] else None,  # TODO: haven't seen enc audio, needs testing
             ) for x in manifest["audio_tracks"]],
+            # SUBTITLE
             [TextTrack(
                 id_=list(x["downloadableIds"].values())[0],
                 source=self.ALIASES[0],
@@ -840,8 +793,7 @@ class Netflix(BaseService):
                 # switches/options
                 needs_proxy=self.download_proxied,
                 # text track options
-                sdh=x["rawTrackType"] == "closedcaptions",
-                cc=x["trackVariant"] if "trackVariant" in x else None,
+                sdh=x["rawTrackType"] == "closedcaptions"
             ) for x in manifest["timedtexttracks"] if not x["isNoneTrack"]]
         )
 
@@ -852,3 +804,4 @@ class Netflix(BaseService):
                 return Language.get(language["language"])
         # e.g. get `en` from "A:1:1;2;en;0;|V:2:1;[...]"
         return Language.get(manifest["defaultTrackOrderList"][0]["mediaId"].split(";")[2])
+

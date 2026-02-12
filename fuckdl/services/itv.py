@@ -371,3 +371,4 @@ class ITV(BaseService):
         title = re.sub(rf"[{'-'}]{{2,}}", "-", title)
         title = re.sub(rf"[{' '}]{{2,}}", " ", title)
         return title
+

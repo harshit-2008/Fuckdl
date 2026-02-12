@@ -13,28 +13,22 @@ from langcodes import Language
 
 from fuckdl.objects import TextTrack, Title, Tracks
 from fuckdl.services.BaseService import BaseService
-from fuckdl.objects import AudioTrack, TextTrack, Title, Tracks, VideoTrack, AudioTrack, MenuTrack
+from fuckdl.objects import AudioTrack, TextTrack, Title, Tracks, VideoTrack, MenuTrack
 from fuckdl.utils import Cdm
 from fuckdl.vendor.pymp4.parser import Box
 from fuckdl.utils.widevine.device import LocalDevice
-
 
 class TUBI(BaseService):
     """
     Service code for TubiTV streaming service (https://tubitv.com/)
 
     \b
-    Version: 1.0.5
+    Version: 1.0.1
     Author: stabbedbybrick
-    Authorization: Cookies (Optional)
-    Geofence: Locked to whatever region the user is in (API only)
+    Authorization: None
     Robustness:
-        Widevine:
-            L3: 1080p, AAC2.0
-        PlayReady:
-            SL2000: 1080p, AAC2.0
-        Clear:
-            1080p, AAC2.0
+      Widevine:
+        L3: 720p, AAC2.0
 
     \b
     Tips:
@@ -42,13 +36,12 @@ class TUBI(BaseService):
             /series/300001423/gotham
             /tv-shows/200024793/s01-e01-pilot
             /movies/589279/the-outsiders
-        - Use '-v H265' to request HEVC tracks.
 
     \b
     Notes:
-        - Authentication is currently not required, but cookies are used if provided.
-        - If 1080p exists, it's currently only available as H.265.
-
+        - Due to the structure of the DASH manifest and requests downloader failing to output progress,
+          aria2c is used as the downloader no matter what downloader is specified in the config.
+        - Search is currently disabled.
     """
     ALIASES = ["TUBI", "tubi", "tubitv", "TubiTV"]
     TITLE_RE = r"^(?:https?://(?:www\.)?tubitv\.com?)?/(?P<type>movies|series|tv-shows)/(?P<id>[a-z0-9-]+)"
@@ -63,20 +56,8 @@ class TUBI(BaseService):
     def __init__(self, ctx, title):
         self.title = title
         super().__init__(ctx)
-
+        self.licenseurl = None
         self.cdm = ctx.obj.cdm
-        self.drm_system = "playready" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "widevine"
-
-        vcodec = ctx.parent.params.get("vcodec")
-        self.vcodec = "H265" if vcodec == "H265" else "H264"
-
-        self.configure()
-        
-    def configure(self):
-        self.auth_token = None
-        if self.cookies is not None:
-            self.auth_token = next((cookie.value for cookie in self.cookies if cookie.name == "at"), None)
-            self.session.headers.update({"Authorization": f"Bearer {self.auth_token}"})
 
     def get_titles(self):
         try:
@@ -85,20 +66,15 @@ class TUBI(BaseService):
             raise ValueError("Could not parse ID from title - is the URL correct?")
 
         params = {
-            "app_id": "tubitv",
-            "platform": "web", # web, android, androidtv
-            "device_id": str(uuid.uuid4()),
+            "platform": "android",
             "content_id": content_id,
-            "limit_resolutions[]": [
-                "h264_1080p",
-                "h265_1080p",
-            ],
+            "device_id": str(uuid.uuid4()),
             "video_resources[]": [
-                "dash_widevine_nonclearlead",
-                "dash_playready_psshv0",
-                                                                           
                 "dash",
-                                
+                "dash_playready",
+            ] if self.cdm.device.type == LocalDevice.Types.PLAYREADY else [
+                "dash",
+                "dash_widevine",
             ],
         }
 
@@ -164,37 +140,16 @@ class TUBI(BaseService):
                 )
 
     def get_tracks(self, title):
-        if not (resources := title.service_data.get("video_resources")):
+        if not title.service_data.get("video_resources"):
             self.log.error(" - Failed to obtain video resources. Check geography settings.")
             self.log.info(f"Title is available in: {title.service_data.get('country')}")
             sys.exit(1)
 
-        codecs = [x.get("codec") for x in resources]
-        if not any(self.vcodec in x for x in codecs):
-            raise ValueError(f"Could not find a {self.vcodec} video resource for this title")
-
-        resource = next((
-            x for x in resources
-            if self.drm_system in x.get("type", "") and self.vcodec in x.get("codec", "")
-        ), None) or next((
-            x for x in resources
-            if self.drm_system not in x.get("type", "") and
-            "dash" in x.get("type", "") and
-            self.vcodec in x.get("codec", "")
-        ), None)
-        if not resource:
-            raise ValueError("Could not find a video resource for this title")
-
-        manifest = resource.get("manifest", {}).get("url")
-        if not manifest:
-            raise ValueError("Could not find a manifest for this title")
-
-
-        
-        title.service_data["license_url"] = resource.get("license_server", {}).get("url")
+        self.manifest = title.service_data["video_resources"][0]["manifest"]["url"]
+        self.licenseurl = title.service_data["video_resources"][0].get("license_server", {}).get("url")
         
         tracks = Tracks.from_mpd(
-            url=manifest,
+            url=self.manifest,
             session=self.session,
             source=self.ALIASES[0]
         )
@@ -238,19 +193,20 @@ class TUBI(BaseService):
         return self.license(**_)
 
         
-    def license(self, challenge, title, **_):
-        if not (license_url := title.service_data.get("license_url")):
+    def license(self, challenge, **_):
+        if not self.licenseurl:
             return None
         if self.cdm.device.type == LocalDevice.Types.PLAYREADY:
-            r = self.session.post(url=license_url, data=challenge)
+            r = self.session.post(url=self.licenseurl, data=challenge)
             if r.status_code != 200:
-                raise ConnectionError(r.text)
+                raise ConnectionError(r.content)
 
             return r.content
         else:
-            r = self.session.post(url=license_url, data=challenge)
+            r = self.session.post(url=self.licenseurl, data=challenge)
             if r.status_code != 200:
-                raise ConnectionError(r.text)
+                raise ConnectionError(r.content)
 
             return r.content
+
 

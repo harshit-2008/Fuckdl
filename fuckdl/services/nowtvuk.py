@@ -42,8 +42,7 @@ class NowTVUK(BaseService):
     ALIASES = ["NOW", "nowtvuk"]
     #GEOFENCE = ["gb"]
 
-    TITLE_RE = [r"https?://(?:www\.)?nowtv\.com/watch/asset(?:/movies|/tv)?(?P<id>/[a-z0-9-]+/[a-zA-Z0-9]+)", r"https?://(?:www\.)?nowtv\.com/watch/asset/(?P<id>/[a-z0-9-]+/[a-zA-Z0-9]+)",
-    r"https?://(?:www\.)?nowtv\.com/watch/asset(?:/movies|/tv)?(?P<id>/[._a-z0-9-]+/[a-zA-Z0-9]+)", r"https?://(?:www\.)?nowtv\.com/watch/asset/(?P<id>/[a-z0-9-]+/[._a-zA-Z0-9]+)"]
+    TITLE_RE = r"https?://(?:www\.)?nowtv\.com/watch/asset(?:/movies|/tv)?(?P<id>/[a-z0-9-]+/[a-zA-Z0-9]+)"
 
     @staticmethod
     @click.command(name="NowTVUK", short_help="https://nowtv.com", help=__doc__)
@@ -237,7 +236,7 @@ class NowTVUK(BaseService):
                     },
                 ],
                 "model": self.config["client"]["model"],
-                "maxVideoFormat": "SD" if self.cdm.device.security_level == 3 else "UHD", # "HD", "UHD"
+                "maxVideoFormat": "UHD" if self.vcodec == "H265" else "HD", # "HD", "UHD"
                 "hdcpEnabled": "True",
                 "supportedColourSpaces": supported_colour_spaces,
             },
@@ -376,3 +375,4 @@ class NowTVUK(BaseService):
             sys.exit(1)
 
         return response["userToken"]
+

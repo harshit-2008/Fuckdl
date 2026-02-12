@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 import re
 from functools import partial
-from operator import attrgetter
+from typing import Optional
 
 import tinycss
 from srt import Subtitle
@@ -13,12 +13,11 @@ from subby.subripfile import SubRipFile
 from subby.utils.time import timedelta_from_timestamp
 
 HTML_TAG = re.compile(r'</?(?!/?i)[^>\s]+>')
-STYLE_TAG = re.compile(r'<c(\.[^>]+)>([^<]+)<\/c>')
+STYLE_TAG_OPEN = re.compile(r'^<c.([a-zA-Z0-9]+)>([^<]+)')
+STYLE_TAG = re.compile(r'<c.([a-zA-Z0-9]+)>([^<]+)<\/c>')
 STYLE_TAG_CLOSE = re.compile(r'<\/c>$')
 SKIP_WORDS = ('WEBVTT', 'NOTE', '/*', 'X-TIMESTAMP-MAP')
 SPEAKER_TAG = re.compile(r'<v\s+[^>]+>')  # Matches opening <v Name> tags, closing tags handled by STYLE_TAG_CLOSE
-RUBY_TEXT_TAG = re.compile(r'<rt>([^<]+)<\/rt>')
-RUBY_PARENTHESIS_TAG = re.compile(r'<rp>([^<]+)<\/rp>')
 
 
 class WebVTTConverter(BaseConverter):
@@ -95,8 +94,7 @@ class WebVTTConverter(BaseConverter):
                     index=line_number,
                     start=timedelta_from_timestamp(start),
                     end=timedelta_from_timestamp(end),
-                    content='',
-                    proprietary=position  # misuse this field to temporarily hold pos  # pyright: ignore[reportArgumentType]
+                    content=''
                 ))
                 looking_for_text = True
                 line_number += 1
@@ -121,13 +119,7 @@ class WebVTTConverter(BaseConverter):
         if text:
             srt[-1].content += '\n'.join(text)
 
-        # Sort lines with identical timecodes by position
-        # Some subtitles have them in an incorrect order, but display correctly due to positioning
-        srt.sort(key=attrgetter('start', 'end', 'proprietary'))
-
         for line in srt:
-            line.proprietary = ''  # remove misused field
-
             # Replace styles with italics tag when appropriate
             # (replace instead of match, to handle nested)
             line.content = re.sub(
@@ -136,17 +128,13 @@ class WebVTTConverter(BaseConverter):
                 line.content
             )
 
-            # Add parentheses around ruby text
-            line.content = re.sub(RUBY_TEXT_TAG, r'(\1)', line.content)
-            line.content = re.sub(RUBY_PARENTHESIS_TAG, r'', line.content)
-
             # Strip non-italic tags
             line.content = re.sub(HTML_TAG, '', line.content)
 
         return srt
 
     @staticmethod
-    def _get_position(cue_settings: list[str]) -> float | None:
+    def _get_position(cue_settings: list[str]) -> Optional[float]:
         """
         Parses list of cue settings and extracts position offset as a float
         Line number based offset and alignment strings are ignored
@@ -158,19 +146,14 @@ class WebVTTConverter(BaseConverter):
 
         position = None
         for key, val in (pos.split(':') for pos in cue_settings):
-            if key == 'line' and val and (val := val.split(',')[0])[-1] == '%':
+            if key == 'line' and (val := val.split(',')[0])[-1] == '%':
                 position = float(val[:-1])
-                break
-            elif key == 'line' and val and val == '0':
-                position = 0
                 break
 
         return position
 
     @staticmethod
     def _replace_italics(match: re.Match, styles: dict[str, dict[str, str]]) -> str:
-        for sn in match[1].split('.'):
-            if ((s := styles.get(sn)) and s.get('font-style') == 'italic') \
-                    or sn == 'font-style_italic':  # out of spec hack
-                return f'<i>{match[2]}</i>'
+        if (s := styles.get(match[1])) and s.get('font-style') == 'italic':
+            return f'<i>{match[2]}</i>'
         return match[0]

@@ -58,11 +58,7 @@ def try_get(obj, func):
         return func(obj)
     except (AttributeError, IndexError, KeyError, TypeError):
         return None
-    
-def get_max_quality(quality):
-    if quality == [None]:
-        return None
-    return max(quality, key=lambda x: 576 if x == "SD" else x)
-
+        
 def short_hash(input):
     return base_encode(int(md5(input).hexdigest(), 16))
+

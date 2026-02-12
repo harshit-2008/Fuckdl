@@ -36,3 +36,4 @@ TERRITORY_MAP = {
 
 # The max distance of languages to be considered "same", e.g. en, en-US, en-AU
 LANGUAGE_MAX_DISTANCE = 5
+

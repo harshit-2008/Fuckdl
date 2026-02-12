@@ -25,11 +25,17 @@ from fuckdl import config
 from fuckdl.constants import LANGUAGE_MUX_MAP, TERRITORY_MAP
 from fuckdl.utils import Cdm, get_boxes, get_closest_match, is_close_match, try_get
 from fuckdl.utils.collections import as_list
-from fuckdl.utils.io import aria2c, download_range, saldl, tqdm_downloader, m3u8re, m3u8dl
+from fuckdl.utils.io import aria2c, download_range, saldl, tqdm_downloader, m3u8re
 from fuckdl.utils.subprocess import ffprobe
 from fuckdl.utils.widevine.protos.widevine_pb2 import WidevineCencHeader
 from fuckdl.utils.xml import load_xml
 from fuckdl.vendor.pymp4.parser import Box, MP4
+
+def format_duration(seconds):
+    """Helper function to format duration for Hybrid logging."""
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02.0f}:{minutes:02.0f}:{seconds:06.3f}"
 
 logger = logging.getLogger("srt")
 logger.setLevel(logging.WARNING)
@@ -72,12 +78,11 @@ class Track:
         ISM = 4  # Smooth Streaming
 
 
-    def __init__(self, id_, source, url, codec, language=None, descriptor=Descriptor.URL, rawurl=None,
+    def __init__(self, id_, source, url, codec, language=None, descriptor=Descriptor.URL,
                  needs_proxy=False, needs_repack=False, encrypted=False, pssh=None, pr_pssh=None, smooth=False, note=None, kid=None, key=None, extra=None):
         self.id = id_
         self.source = source
         self.url = url
-        self.rawurl = rawurl
         # required basic metadata
         self.note= note
         self.codec = codec
@@ -175,41 +180,38 @@ class Track:
             automatically.
         """
         
-        try:
-            if self.source in ["MA", "CRAV", "ITV", "HULU", "MUBI"]:
-                mp4_file = 'init.mp4'
-                data = self.get_data_chunk(session)
-                with open(mp4_file, 'wb') as f:
-                    f.write(data)
+        if self.source in ["MA", "CRAV", "ITV"]:
+            mp4_file = 'init.mp4'
+            data = self.get_data_chunk(session)
+            with open(mp4_file, 'wb') as f:
+                f.write(data)
 
-                executable = shutil.which("mp4dump")
-                mp4_data = subprocess.check_output([executable, '--format', 'json', '--verbosity', '3', mp4_file])
-                mp4_data = json.loads(mp4_data)
-                #os.remove(mp4_file)
-                
-                for temp in mp4_data:
-                    if (temp['name'] == 'moov'):
-                        for child in temp['children']:
-                            if ('system_id' in child and child['system_id'] == '[9a 04 f0 79 98 40 42 86 ab 92 e6 5b e0 88 5f 95]'):
-                                box_size_dec = child['size']
-                                pr_pssh_data = child['data']
-                                pr_pssh_data_size_dec = child['data_size']
-                                break
-                        break
+            executable = shutil.which("mp4dump")
+            mp4_data = subprocess.check_output([executable, '--format', 'json', '--verbosity', '3', mp4_file])
+            mp4_data = json.loads(mp4_data)
+            #os.remove(mp4_file)
             
-                pr_pssh_data = pr_pssh_data.replace('[', '').replace(']', '').replace(' ', '')
-                if len(pr_pssh_data) % 2 != 0:
-                    raise ValueError("Invalid hex string length. Must be even.")
-                box_size_hex = format(box_size_dec, '08x')
-                pr_pssh_data_size_hex = format(pr_pssh_data_size_dec, '08x')
-            
-                pr_pssh_hex = f'{box_size_hex}70737368000000009a04f07998404286ab92e65be0885f95{pr_pssh_data_size_hex}{pr_pssh_data}'
-            
-                pr_pssh = (base64.b64encode(bytes.fromhex(pr_pssh_hex))).decode('utf-8')
-                self.pr_pssh = pr_pssh
-                return True
-        except:
-            pass
+            for temp in mp4_data:
+                if (temp['name'] == 'moov'):
+                    for child in temp['children']:
+                        if ('system_id' in child and child['system_id'] == '[9a 04 f0 79 98 40 42 86 ab 92 e6 5b e0 88 5f 95]'):
+                            box_size_dec = child['size']
+                            pr_pssh_data = child['data']
+                            pr_pssh_data_size_dec = child['data_size']
+                            break
+                    break
+        
+            pr_pssh_data = pr_pssh_data.replace('[', '').replace(']', '').replace(' ', '')
+            if len(pr_pssh_data) % 2 != 0:
+                raise ValueError("Invalid hex string length. Must be even.")
+            box_size_hex = format(box_size_dec, '08x')
+            pr_pssh_data_size_hex = format(pr_pssh_data_size_dec, '08x')
+        
+            pr_pssh_hex = f'{box_size_hex}70737368000000009a04f07998404286ab92e65be0885f95{pr_pssh_data_size_hex}{pr_pssh_data}'
+        
+            pr_pssh = (base64.b64encode(bytes.fromhex(pr_pssh_hex))).decode('utf-8')
+            self.pr_pssh = pr_pssh
+            return True
         
         if not session:
             session = Session()
@@ -225,35 +227,35 @@ class Track:
                 if x and x.keyformat.lower() == Cdm.urn
             ])
             for x in master.session_keys:
-                if x and x.keyformat.lower() == "com.microsoft.playready":
+                if x and x.keyformat.lower == "com.microsoft.playready":
                     self.pr_pssh = x.uri.split(",")[-1]
                     break
             for x in master.keys:
                 if x and "com.microsoft.playready" in str(x):
                     self.pr_pssh = str(x).split("\"")[1].split(",")[-1]
                     break
-        if not self.source in ["HULU"]:
-            try:
-                xml_str = base64.b64decode(self.pr_pssh).decode("utf-16-le", "ignore")
-                xml_str = xml_str[xml_str.index("<"):]
+        
+        try:
+            xml_str = base64.b64decode(self.pr_pssh).decode("utf-16-le", "ignore")
+            xml_str = xml_str[xml_str.index("<"):]
 
-                xml = load_xml(xml_str).find("DATA")  # root: WRMHEADER
+            xml = load_xml(xml_str).find("DATA")  # root: WRMHEADER
 
-                self.kid = xml.findtext("KID")  # v4.0.0.0
-                if not self.kid:  # v4.1.0.0
-                    self.kid = next(iter(xml.xpath("PROTECTINFO/KID/@VALUE")), None)
-                if not self.kid:  # v4.3.0.0
-                    self.kid = next(iter(xml.xpath("PROTECTINFO/KIDS/KID/@VALUE")), None)  # can be multiple?
+            self.kid = xml.findtext("KID")  # v4.0.0.0
+            if not self.kid:  # v4.1.0.0
+                self.kid = next(iter(xml.xpath("PROTECTINFO/KID/@VALUE")), None)
+            if not self.kid:  # v4.3.0.0
+                self.kid = next(iter(xml.xpath("PROTECTINFO/KIDS/KID/@VALUE")), None)  # can be multiple?
 
-                self.kid = uuid.UUID(base64.b64decode(self.kid).hex()).bytes_le.hex()
-                
-                return True
+            self.kid = uuid.UUID(base64.b64decode(self.kid).hex()).bytes_le.hex()
+            
+            return True
 
-            except: pass       
+        except: pass       
 
 
         try:
-            if self.pr_pssh or not self.encrypted:
+            if self.pssh or not self.encrypted:
                 return True
 
             if not session:
@@ -311,41 +313,38 @@ class Track:
             automatically.
         """
         
-        try:
-            if self.source in ["MA", "HULU"]:
-                mp4_file = 'init.mp4'
-                data = self.get_data_chunk(session)
-                with open(mp4_file, 'wb') as f:
-                    f.write(data)
+        if self.source in ["MA"]:
+            mp4_file = 'init.mp4'
+            data = self.get_data_chunk(session)
+            with open(mp4_file, 'wb') as f:
+                f.write(data)
 
-                executable = shutil.which("mp4dump")
-                mp4_data = subprocess.check_output([executable, '--format', 'json', '--verbosity', '3', mp4_file])
-                mp4_data = json.loads(mp4_data)
-                #os.remove(mp4_file)
-                
-                for temp in mp4_data:
-                    if (temp['name'] == 'moov'):
-                        for child in temp['children']:
-                            if ('system_id' in child and child['system_id'] == '[ed ef 8b a9 79 d6 4a ce a3 c8 27 dc d5 1d 21 ed]'):
-                                box_size_dec = child['size']
-                                pssh_data = child['data']
-                                pssh_data_size_dec = child['data_size']
-                                break
-                        break
+            executable = shutil.which("mp4dump")
+            mp4_data = subprocess.check_output([executable, '--format', 'json', '--verbosity', '3', mp4_file])
+            mp4_data = json.loads(mp4_data)
+            #os.remove(mp4_file)
             
-                pssh_data = pssh_data.replace('[', '').replace(']', '').replace(' ', '')
-                if len(pssh_data) % 2 != 0:
-                    raise ValueError("Invalid hex string length. Must be even.")
-                box_size_hex = format(box_size_dec, '08x')
-                pssh_data_size_hex = format(pssh_data_size_dec, '08x')
-            
-                pssh_hex = f'{box_size_hex}7073736800000000edef8ba979d64acea3c827dcd51d21ed{pssh_data_size_hex}{pssh_data}'
-            
-                pssh = (base64.b64encode(bytes.fromhex(pssh_hex))).decode('utf-8')
-                self.pssh = pssh
-                return True
-        except:
-            pass
+            for temp in mp4_data:
+                if (temp['name'] == 'moov'):
+                    for child in temp['children']:
+                        if ('system_id' in child and child['system_id'] == '[ed ef 8b a9 79 d6 4a ce a3 c8 27 dc d5 1d 21 ed]'):
+                            box_size_dec = child['size']
+                            pssh_data = child['data']
+                            pssh_data_size_dec = child['data_size']
+                            break
+                    break
+        
+            pssh_data = pssh_data.replace('[', '').replace(']', '').replace(' ', '')
+            if len(pssh_data) % 2 != 0:
+                raise ValueError("Invalid hex string length. Must be even.")
+            box_size_hex = format(box_size_dec, '08x')
+            pssh_data_size_hex = format(pssh_data_size_dec, '08x')
+        
+            pssh_hex = f'{box_size_hex}7073736800000000edef8ba979d64acea3c827dcd51d21ed{pssh_data_size_hex}{pssh_data}'
+        
+            pssh = (base64.b64encode(bytes.fromhex(pssh_hex))).decode('utf-8')
+            self.pssh = pssh
+            return True
         
         if self.pssh or not self.encrypted:
             return True
@@ -415,32 +414,39 @@ class Track:
             automatically.
         """
         
-        try:
-            if self.source in ["DSNP", "MA", "CRAV", "ITV", "HULU"] and not self.kid:
-                mp4_file = 'init.mp4'
-                data = self.get_data_chunk(session)
-                with open(mp4_file, 'wb') as f:
-                    f.write(data)
+        if self.source in ["DSNP", "MA", "CRAV", "ITV"] and not self.kid:
+            mp4_file = 'init.mp4'
+            data = self.get_data_chunk(session)
+            with open(mp4_file, 'wb') as f:
+                f.write(data)
 
-                executable = shutil.which("mp4dump")
-                mp4_data = subprocess.check_output([executable, '--format', 'json', '--verbosity', '3', mp4_file])
-                mp4_data = json.loads(mp4_data)
-                os.remove(mp4_file)
+            executable = shutil.which("mp4dump")
+            mp4_data = subprocess.check_output([executable, '--format', 'json', '--verbosity', '3', mp4_file])
+            mp4_data = json.loads(mp4_data)
+            os.remove(mp4_file)
 
-                for a in mp4_data:
-                    if a['name'] == 'moov':
-                        for b in a['children']:
-                            if b['name'] == 'trak':
-                                for c in b['children']:
-                                    if c['name'] == 'mdia':
-                                        for d in c['children']:
-                                            if d['name'] == 'minf':
-                                                for e in d['children']:
-                                                    if e['name'] == 'stbl':
-                                                        for f in e['children']:
-                                                            if f['name'] == 'stsd':
-                                                                for g in f['children']:
-                                                                    if g['name'] == 'encv':
+            for a in mp4_data:
+                if a['name'] == 'moov':
+                    for b in a['children']:
+                        if b['name'] == 'trak':
+                            for c in b['children']:
+                                if c['name'] == 'mdia':
+                                    for d in c['children']:
+                                        if d['name'] == 'minf':
+                                            for e in d['children']:
+                                                if e['name'] == 'stbl':
+                                                    for f in e['children']:
+                                                        if f['name'] == 'stsd':
+                                                            for g in f['children']:
+                                                                if g['name'] == 'encv':
+                                                                    for h in g['children']:
+                                                                        if h['name'] == 'sinf':
+                                                                            for i in h['children']:
+                                                                                if i['name'] == 'schi':
+                                                                                    for j in i['children']:
+                                                                                        if j['name'] == 'tenc':
+                                                                                            kid = j['default_KID']
+                                                                elif g['name'] == 'enca':
                                                                         for h in g['children']:
                                                                             if h['name'] == 'sinf':
                                                                                 for i in h['children']:
@@ -448,18 +454,8 @@ class Track:
                                                                                         for j in i['children']:
                                                                                             if j['name'] == 'tenc':
                                                                                                 kid = j['default_KID']
-                                                                    elif g['name'] == 'enca':
-                                                                            for h in g['children']:
-                                                                                if h['name'] == 'sinf':
-                                                                                    for i in h['children']:
-                                                                                        if i['name'] == 'schi':
-                                                                                            for j in i['children']:
-                                                                                                if j['name'] == 'tenc':
-                                                                                                    kid = j['default_KID']
-                self.kid = kid.replace(' ', '').replace('[', '').replace(']', '')
-                return True
-        except:
-            pass
+            self.kid = kid.replace(' ', '').replace('[', '').replace(']', '')
+            return True
 
         if self.kid or not self.encrypted:
             return True
@@ -517,7 +513,7 @@ class Track:
 
         return False
 
-    def download(self, downloader, track, out, name=None, headers=None, proxy=None):
+    def download(self, out, name=None, headers=None, proxy=None):
         """
         Download the Track and apply any necessary post-edits like Subtitle conversion.
 
@@ -541,15 +537,14 @@ class Track:
             id=self.id,
             enc="enc" if self.encrypted else "dec"
         )
-        
         name = re_name + ".mp4"
-                        
+        if self.__class__.__name__ == "AudioTrack" and self.source in ["iT", "ATVP"]:
+            name = re_name + ".m4a"
+        if self.__class__.__name__ == "TextTrack" and self.source in ["iT", "ATVP"]:
+            name = re_name + ".vtt"
         save_path = os.path.join(out, name)
-        
-        if track.descriptor == track.descriptor.URL and str(downloader).lower() == "n_m3u8dl-re" or str(downloader).lower() == "m3u8DL":
-            raise Exception(f"Unsupported downloader")
 
-        if self.descriptor == self.Descriptor.M3U:
+        if self.descriptor == self.Descriptor.M3U and not self.source in ["iT", "ATVP"]:
             master = m3u8.loads(
                 requests.get(
                     as_list(self.url)[0],
@@ -560,7 +555,7 @@ class Track:
             )
 
             # Keys may be [] or [None] if unencrypted
-            if any(master.keys + master.session_keys) and not self.source in ["PlutoTV"]:
+            if any(master.keys + master.session_keys):
                 self.encrypted = True
                 self.get_kid()
                 self.get_pssh()
@@ -622,11 +617,9 @@ class Track:
             else:
                 # --use-system-proxy False
                 subprocess.run(f"{executable} {extracted_url} --save-name {re_name} --save-dir {out} --tmp-dir {out} -sv best --use-system-proxy False --log-level ERROR")
-        elif self.source == "CORE" or str(downloader).lower() == "saldl":
+        elif self.source == "CORE":
             asyncio.run(saldl(
                 self.url,
-                track,
-                self.source,
                 save_path,
                 headers,
                 proxy if self.needs_proxy else None
@@ -638,27 +631,21 @@ class Track:
                 headers,
                 proxy if self.needs_proxy else None
             ))
-        elif str(downloader).lower() == "aria2c":
-            asyncio.run(aria2c(
+        elif self.source in ["iT", "ATVP"]:
+            asyncio.run(m3u8re(
                 self.url,
-                track,
-                self.source,
                 save_path,
-                headers if not self.source in ["ATVP", "iT", "SRLY"] else {},
+                headers,
                 proxy if self.needs_proxy else None
             ))
-        elif str(downloader).lower() == "n_m3u8dl-re" or str(downloader).lower() == "m3u8DL":
-            asyncio.run(m3u8dl(
-                self.rawurl,
-                track,
+        else:
+            asyncio.run(aria2c(
+                self.url,
                 save_path,
-                headers if not self.source in ["ATVP", "iT", "SRLY"] else {},
+                headers if not self.source in ["ATVP", "iT"] else {},
                 proxy if self.needs_proxy else None
             ))
 
-        else:
-            raise Exception(f"Unsupported downloader")
-                
         if os.stat(save_path).st_size <= 3:  # Empty UTF-8 BOM == 3 bytes
             raise IOError(
                 "Download failed, the downloaded file is empty. "
@@ -753,7 +740,6 @@ class VideoTrack(Track):
         self.dv = bool(dv)
         self.needs_ccextractor = needs_ccextractor
         self.needs_ccextractor_first = needs_ccextractor_first
-        self.needs_duration_fix = False  # ADD THIS LINE for hybrid mode sync fix        
 
     def __str__(self):
         codec = next((CODEC_MAP[x] for x in CODEC_MAP if (self.codec or "").startswith(x)), self.codec)
@@ -770,7 +756,7 @@ class VideoTrack(Track):
         if not self._location:
             raise ValueError("You must download the track first.")
 
-        executable = shutil.which("ccextractor") or shutil.which("ccextractorwin") or shutil.which("ccextractorwinfull")
+        executable = shutil.which("ccextractor") or shutil.which("ccextractorwin")
         if not executable:
             raise EnvironmentError("ccextractor executable was not found.")
         try:
@@ -783,7 +769,7 @@ class VideoTrack(Track):
                 if "[iso file] Unknown box type ID32" not in line:
                     sys.stdout.write(line)
             returncode = p.wait()
-               
+
             #if returncode and returncode != 10:
             #    raise self.log.exit(f" - ccextractor exited with return code {returncode}")
 
@@ -942,7 +928,7 @@ class TextTrack(Track):
 
     @staticmethod
     def convert_to_srt(data, codec):
-        if codec in ["dfxp", "ttml", "ttml2", "smpte", "ttmlv2", "dfxp-ls-sdh"]:
+        if codec in ["dfxp", "ttml", "ttml2", "smpte"]:
             converter = SMPTEConverter()
         elif codec in ["vtt", "webvtt", "webvtt-lssdh-ios8"]:
             converter = WebVTTConverter()
@@ -960,19 +946,14 @@ class TextTrack(Track):
         fixed, status = fixer.from_srt(srt)
         if status and fixed:
             srt = fixed
-            
+
         return srt
 
-    def download(self, downloader, track, out, name=None, headers=None, proxy=None):
-        if str(downloader).lower() == "n_m3u8dl-re":
-            downloader = "aria2c"
-        
-        save_path = super().download(downloader, track, out, name, headers, proxy)
-                          
+    def download(self, out, name=None, headers=None, proxy=None):
+        save_path = super().download(out, name, headers, proxy)
         if self.codec.lower() == "ass":
             return save_path  # Return the .ass file as-is without any conversion
-        elif self.source in ["VDL", "BB"]:
-                                                       
+        elif self.source in ["VDL"]:
             executable = shutil.which("SubtitleEdit")
             if not executable:
                 raise EnvironmentError("SubtitleEdit executable was not found.")
@@ -983,12 +964,8 @@ class TextTrack(Track):
                     f"/outputfilename:{self._location}",
                     "/overwrite",
                     "/multiplereplace:.",
-                    "/RemoveFormatting",
                     "/RemoveTextForHI"
                 ], check=True)
-                                                  
-                                
-                                           
         elif self.codec.lower() != "srt":
             with open(save_path, "rb") as fd:
                 data = fd.read()
@@ -1187,8 +1164,8 @@ class Tracks:
 
         log = logging.getLogger("Tracks")
 
-        #if duplicates:
-        #    log.warning(f" - Found and skipped {duplicates} duplicate tracks")
+        if duplicates:
+            log.warning(f" - Found and skipped {duplicates} duplicate tracks")
 
     def print(self, level=logging.INFO):
         """Print the __str__ to log at a specified level."""
@@ -1321,14 +1298,6 @@ class Tracks:
         one_only: bool = True, by_codec=None,
     ) -> None:
         """Filter video tracks by language and other criteria."""
-        # Handle hybrid mode (DVHDR, HDRDV, HYBRID)
-        dv_track = None
-        if by_range and by_range.upper() in ("DVHDR", "HDRDV", "HYBRID"):
-            # Find the lowest bitrate DV track for metadata extraction
-            dv_tracks = [video for video in self.videos if video.dv]
-            if dv_tracks:
-                dv_track = min(dv_tracks, key=lambda x: x.bitrate or float('inf'))
-            one_only = False  # Need to keep 2 tracks (HDR10 + DV)                                                                                     
         if by_quality:
             # Note: Do not merge these list comprehensions. They must be done separately so the results
             # from the 16:9 canvas check is only used if there's no exact height resolution match.
@@ -1360,30 +1329,38 @@ class Tracks:
             else:
                 self.videos = (codec_videos if codec_videos else self.videos)
         if by_range:
-            # Handle hybrid mode - select HDR10 track + lowest DV track
-            if by_range.upper() in ("DVHDR", "HDRDV", "HYBRID"):
-                # Filter to get HDR10 tracks only
-                self.videos = [x for x in self.videos if x.hdr10]
-                if not self.videos:
-                    raise ValueError(f"There's no HDR10 video track for hybrid mode. Aborting.")
-                if not dv_track:
-                    raise ValueError(f"There's no DV video track for hybrid mode. Aborting.")
-                # Select first (highest quality) HDR10 track + lowest DV track
-                self.videos = [self.videos[0], dv_track]
-            else:
-                # Normal range filtering (existing logic)
-                self.videos = [x for x in self.videos if {
-                    "HDR10": x.hdr10,
-                    "HLG": x.hlg,
-                    "DV": x.dv,
-                    "SDR": not x.hdr10 and not x.dv
-                }.get((by_range or "").upper(), True)]
-                if not self.videos:
-                    raise ValueError(f"There's no {by_range} video track. Aborting.")
+            self.videos = [x for x in self.videos if {
+                "HDR10": x.hdr10,
+                "HLG": x.hlg,
+                "DV": x.dv,
+                "SDR": not x.hdr10 and not x.dv
+            }.get((by_range or "").upper(), True)]
+            if not self.videos:
+                raise ValueError(f"There's no {by_range} video track. Aborting.")
         if by_language:
             self.videos = list(self.select_by_language(by_language, self.videos))
         if one_only and self.videos:
             self.videos = [self.videos[0]]
+
+    def select_videos_multi(self, ranges: list[str], by_quality=None, by_vbitrate=None) -> None:
+        """Select multiple video tracks for different HDR ranges (e.g., DV+HDR)."""
+        selected = []
+        for r in ranges:
+            temp = Tracks()
+            temp.videos = self.videos.copy()
+            temp.select_videos(by_range=r, by_quality=by_quality, one_only=False)
+            if by_vbitrate:
+                temp.videos = [x for x in temp.videos if int(x.bitrate) <= int(by_vbitrate * 1001)]
+            if temp.videos:
+                best = max(temp.videos, key=lambda x: x.bitrate)
+                selected.append(best)
+        # Include HDR type in uniqueness check
+        unique = {}
+        for v in selected:
+            key = (v.width, v.height, v.codec, v.hdr10, v.dv)
+            if key not in unique or v.bitrate > unique[key].bitrate:
+                unique[key] = v
+        self.videos = list(unique.values())
 
     def select_audios(
         self,
@@ -1398,27 +1375,42 @@ class Tracks:
         """Filter audio tracks by language and other criteria."""
         if not with_descriptive:
             self.audios = [x for x in self.audios if not x.descriptive]
+        
         if by_codec:
-            codec_audio = list(filter(lambda x: any(y for y in self.AUDIO_CODEC_MAP[by_codec] if y in x.codec), self.audio))
+            # FIX: changed self.audio to self.audios
+            # Ensure you have AUDIO_CODEC_MAP defined somewhere or use the global CODEC_MAP logic
+            # Assuming AUDIO_CODEC_MAP is a class constant or similar, otherwise revert to string check
+            codec_audio = list(filter(lambda x: by_codec.lower() in (x.codec or "").lower(), self.audios))
             if not codec_audio and not should_fallback:
                 raise ValueError(f"There's no {by_codec} audio tracks. Aborting.")
             else:
                 self.audios = (codec_audio if codec_audio else self.audios)
+        
         if by_channels:
             channels_audio = list(filter(lambda x: x.channels == by_channels, self.audios))
             if not channels_audio and not should_fallback:
-                raise ValueError(f"There's no {by_channels} {by_codec} audio tracks. Aborting.")
+                raise ValueError(f"There's no {by_channels} audio tracks. Aborting.")
             else:
                 self.audios = (channels_audio if channels_audio else self.audios)
+        
         if with_atmos:
             atmos_audio = list(filter(lambda x: x.atmos, self.audios))
-            self.audios = (atmos_audio if atmos_audio else self.audios)  # Fallback if no atmos
+            # Fallback allowed implicitly here in original code, keeping behavior
+            self.audios = (atmos_audio if atmos_audio else self.audios) 
+            
         if by_bitrate:
             self.audios = [x for x in self.audios if int(x.bitrate) <= int(by_bitrate * 1000)]
+            
         if by_language:
-            # Todo: Optimize select_by_language
-            self.audios = list(self.select_by_language(by_language, self.audios)) + \
-                          list(self.select_by_language(by_language, [x for x in self.audios if x.descriptive]))
+            # Fixed logic: Select normal tracks + Select descriptive tracks
+            # Note: select_by_language returns a generator, list() consumes it.
+            normal_audios = [x for x in self.audios if not x.descriptive]
+            desc_audios = [x for x in self.audios if x.descriptive]
+            
+            selected = list(self.select_by_language(by_language, normal_audios))
+            selected += list(self.select_by_language(by_language, desc_audios))
+            
+            self.audios = selected
 
     def select_subtitles(self, by_language=None, with_cc=True, with_sdh=True, with_forced=True):
         """Filter subtitle tracks by language and other criteria."""
@@ -1463,21 +1455,158 @@ class Tracks:
         from fuckdl import parsers
         return parsers.ism.parse(**kwargs)
 
-    def mux(self, prefix, hybrid=False, hybrid_location=None):
+    # DV+HDR Hybrid functionality
+    def make_hybrid(self) -> str:
+        """Create a hybrid DV+HDR track from separate HDR10 and DV tracks."""
+        import time
+        from pathlib import Path
+        
+        start_time = time.time()
+        log = logging.getLogger("Hybrid")
+        log.info(" + Processing to Hybrid")
+
+        # logic to find specific tracks
+        hdr = next((t for t in self.videos if t.hdr10 and not t.dv), None)
+        dv = next((t for t in self.videos if t.dv and not t.hdr10), None)
+        
+        if not hdr or not dv:
+            raise ValueError("Hybrid failed: Could not find valid pair of HDR10 and DV tracks.")
+        
+        hdr_path = Path(hdr.locate()).resolve()
+        dv_path = Path(dv.locate()).resolve()
+        
+        # We output a raw HEVC file. mkvmerge supports this natively.
+        hybrid_output = hdr_path.with_name(f"{hdr_path.stem}_hybrid.hevc")
+        
+        try:
+            hybrid_file = self.make_hybrid_dv_hdr(
+                dv_file=dv_path, 
+                hdr_file=hdr_path, 
+                output_file=hybrid_output
+            )
+            
+            # Verify the file was actually created and has content
+            hybrid_path = Path(hybrid_file)
+            if not hybrid_path.exists() or hybrid_path.stat().st_size < 1000:
+                raise FileNotFoundError(f"Hybrid file creation failed or file is empty: {hybrid_path}")
+
+            # Update the HDR track location to point to the new Hybrid file
+            hdr._location = str(hybrid_path)
+            
+            # Remove the now-redundant DV track from the list so it doesn't get muxed separately
+            if dv in self.videos:
+                self.videos.remove(dv)
+            
+            # Delete the original separate files to save space
+            try:
+                if hdr_path.exists() and hdr_path != hybrid_path:
+                    hdr_path.unlink()
+                if dv_path.exists():
+                    dv_path.unlink()
+            except Exception as e:
+                log.warning(f" - Failed to delete source files after hybrid creation: {e}")
+
+        except Exception as e:
+            log.error(f" - Hybrid creation failed: {e}")
+            raise
+
+        end_time = time.time()
+        duration = format_duration(end_time - start_time)
+        log.info(f" + Finish processing Hybrid in {duration}!")
+        
+        return str(hdr._location)
+
+    def make_hybrid_dv_hdr(self, dv_file: Path, hdr_file: Path, output_file: Path) -> str:
+        """Create hybrid DV+HDR track using dovi_tool."""
+        
+        # Locate binaries
+        dovi_tool = shutil.which("dovi_tool")
+        # Fallback to local bin if not in PATH
+        if not dovi_tool:
+            dovi_tool = shutil.which("dovi_tool", path="./binaries")
+        
+        if not dovi_tool:
+            raise EnvironmentError("dovi_tool executable not found in PATH or ./binaries/")
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+             raise EnvironmentError("ffmpeg executable not found.")
+
+        # Temp filenames
+        rpu_file = output_file.with_name("RPU.bin")
+        
+        # We need raw HEVC streams for dovi_tool. 
+        # If inputs are mp4/mkv, we must extract them.
+        temp_files_to_clean = [rpu_file]
+        
+        dv_input = dv_file
+        hdr_input = hdr_file
+
+        try:
+            # 1. Prepare DV input (Extract if not .hevc)
+            if dv_file.suffix.lower() != ".hevc":
+                dv_raw = dv_file.with_suffix(".temp_dv.hevc")
+                temp_files_to_clean.append(dv_raw)
+                subprocess.run([
+                    ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", str(dv_file),
+                    "-c:v", "copy", "-bsf:v", "hevc_mp4toannexb",
+                    "-f", "hevc", str(dv_raw)
+                ], check=True)
+                dv_input = dv_raw
+
+            # 2. Prepare HDR input (Extract if not .hevc)
+            if hdr_file.suffix.lower() != ".hevc":
+                hdr_raw = hdr_file.with_suffix(".temp_hdr.hevc")
+                temp_files_to_clean.append(hdr_raw)
+                subprocess.run([
+                    ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", str(hdr_file),
+                    "-c:v", "copy", "-bsf:v", "hevc_mp4toannexb",
+                    "-f", "hevc", str(hdr_raw)
+                ], check=True)
+                hdr_input = hdr_raw
+
+            # 3. Extract RPU from DV
+            # dovi_tool extract-rpu -i input.hevc -o RPU.bin
+            subprocess.run([
+                dovi_tool, "extract-rpu", 
+                "-i", str(dv_input), 
+                "-o", str(rpu_file)
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+            # 4. Inject RPU into HDR
+            # dovi_tool inject-rpu -i input.hevc -r RPU.bin -o output.hevc
+            subprocess.run([
+                dovi_tool, "inject-rpu", 
+                "-i", str(hdr_input), 
+                "-r", str(rpu_file), 
+                "-o", str(output_file)
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Error running dovi_tool/ffmpeg: {e}")
+        finally:
+            # Clean up all temp files
+            for temp in temp_files_to_clean:
+                if temp.exists():
+                    try:
+                        temp.unlink()
+                    except OSError:
+                        pass
+
+        return str(output_file)
+
+    def mux(self, prefix):
         """
         Takes the Video, Audio and Subtitle Tracks, and muxes them into an MKV file.
         It will attempt to detect Forced/Default tracks, and will try to parse the language codes of the Tracks
         """
         if self.videos:
-            if hybrid and hybrid_location:
-                # Use the pre-injected DV metadata file
-                from pathlib import Path
-                muxed_location = Path(hybrid_location)
-            else:
-                muxed_location = self.videos[0].locate()
+            muxed_location = self.videos[0].locate()
             if not muxed_location:
                 raise ValueError("The provided video track has not yet been downloaded.")
-            muxed_location = os.path.splitext(str(muxed_location))[0] + ".muxed.mkv"
+            muxed_location = os.path.splitext(muxed_location)[0] + ".muxed.mkv"
         elif self.audios:
             muxed_location = self.audios[0].locate()
             if not muxed_location:
@@ -1504,38 +1633,17 @@ class Tracks:
             muxed_location
         ]
 
-        # If hybrid mode, only mux the first video (HDR10 with injected DV metadata)
-        if hybrid:
-            videos_to_mux = [self.videos[0]]
-        else:
-            videos_to_mux = self.videos
-
-        for i, vt in enumerate(videos_to_mux):
+        for i, vt in enumerate(self.videos):
             location = vt.locate()
-            # Use hybrid location if available
-            if hybrid and hybrid_location:
-                location = hybrid_location                 
             if not location:
                 raise ValueError("Somehow a Video Track was not downloaded before muxing...")
-            
-            video_args = [
+            cl.extend([
                 "--language", "0:und",
                 "--disable-language-ietf",
                 "--default-track", f"0:{i == 0}",
                 "--compression", "0:none",  # disable extra compression
-            ]
-            
-            # Fix duration for hybrid videos to prevent A/V desync
-            if hasattr(vt, 'needs_duration_fix') and vt.needs_duration_fix and vt.fps:
-                video_args.extend([
-                    "--default-duration",
-                    f"0:{vt.fps:.3f}fps",
-                    "--fix-bitstream-timing-information",
-                    "0:1",
-                ])
-            
-            cl.extend(video_args + ["(", str(location), ")"])
-            
+                "(", location, ")"
+            ])
         for i, at in enumerate(self.audios):
             location = at.locate()
             if not location:
@@ -1550,7 +1658,6 @@ class Tracks:
                 "--compression", "0:none",  # disable extra compression
                 "(", location, ")"
             ])
-            
         for st in self.subtitles:
             location = st.locate()
             if not location:
@@ -1568,7 +1675,6 @@ class Tracks:
                 "--compression", "0:none",  # disable extra compression (probably zlib)
                 "(", location, ")"
             ])
-            
         if self.chapters:
             location = config.filenames.chapters.format(filename=prefix)
             self.export_chapters(location)
@@ -1589,142 +1695,25 @@ class Tracks:
                     sys.stdout.write("\n")
                 sys.stdout.write(line)
         returncode = p.wait()
-        
-        # Cleanup hybrid DV injection temporary file
-        if hybrid and hybrid_location and os.path.exists(str(hybrid_location)):
-            try:
-                os.remove(str(hybrid_location))
-            except Exception:
-                pass  # Ignore cleanup errors
-        
         return muxed_location, returncode
 
-
-class DV_INJECTION:
-    """
-    Takes the Dolby Vision and HDR10(+) streams out of the VideoTracks.
-    It will then attempt to inject the Dolby Vision metadata layer to the HDR10(+) stream.
-    """
-    def __init__(self, hdr_path, dv_path, log):
-        self.log = log
-        dv_name = str(dv_path)
-        hdr_name = str(hdr_path)
-        dv_bin = dv_name.replace('.mp4', '.bin')
-        hdr_hevc = hdr_name.replace('.mp4', '.hevc')
-        hdr_out = dv_name.replace('.mp4', '.hevc')
-        self.log.info(" + DOLBY VISION METADATA INJECTION")
-
-        if os.path.exists(hdr_out):
-            self.log.info(" ✓ Already Injected")
-            return
-
-        self.extract_stream(hdr_name, hdr_hevc)
-        self.extract_rpu(dv_name, dv_bin)
-
-        if os.path.exists(dv_bin):
-            self.rpu_file = dv_bin
-
-        self.injecting(hdr_hevc, dv_bin, hdr_out)
-
-        if os.path.exists(hdr_out):
-            self.log.info(" ✓ Injection Completed")
-            # Remove temporary files
-            if os.path.exists(dv_bin):
-                os.remove(dv_bin)
-            if os.path.exists(hdr_hevc):
-                os.remove(hdr_hevc)
-            # Mark DV file location as deleted so track cleanup doesn't try to delete it again
-            if os.path.exists(dv_name):
-                os.remove(dv_name)
-
-    def extract_stream(self, hdr_name, hdr_hevc):
-        if os.path.exists(hdr_hevc):
-            return
-
-        self.log.info(" + Demuxing HEVC stream")
-        extract_stream = subprocess.run(
-            [
-                "ffmpeg",
-                "-i",
-                hdr_name,
-                "-c:v",
-                "copy",
-                "-vbsf",
-                "hevc_mp4toannexb",
-                "-f",
-                "hevc",
-                hdr_hevc,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if extract_stream.returncode:
-            self.log.exit(" x Failed extracting HEVC stream")
-
-    def extract_rpu(self, dv_name, dv_bin):
-        if os.path.exists(dv_bin):
-            return
-
-        self.log.info(" + Extracting RPU from Dolby Vision stream")
-        ffmpeg_args = [
-            'ffmpeg',
-            '-i',
-            dv_name, '-y', '-hide_banner',
-            '-loglevel', 'warning',
-            '-c:v',
-            'copy',
-            '-vbsf',
-            'hevc_mp4toannexb',
-            '-f',
-            'hevc',
-            '-']
-        ffmpeg_proc = subprocess.Popen(
-            ffmpeg_args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        dovi_tool_args = [
-            'dovi_tool',
-            '--mode',
-            '3',
-            'extract-rpu',
-            '-',
-            '-o',
-            dv_bin
-        ]
-        dovi_tool_proc = subprocess.run(
-            dovi_tool_args,
-            stdin=ffmpeg_proc.stdout,
-            stderr=subprocess.PIPE
-        )
-
-        error = dovi_tool_proc.stderr.decode('utf-8')
-        if error:
-            self.log.info(f"Error message: {error}")
-
-        if dovi_tool_proc.returncode:
-            self.log.exit(" x Failed Extracting Dolby Vision metadata")
-
-    def injecting(self, hdr_hevc, dv_bin, hdr_out):
-        if os.path.exists(hdr_out):
-            return
-
-        self.log.info(" + Injecting Dolby Vision metadata into HDR stream")
-
-        inject = subprocess.run(
-            [
-                "dovi_tool",
-                "inject-rpu",
-                "-i",
-                hdr_hevc,
-                "--rpu-in",
-                dv_bin,
-                "-o",
-                hdr_out,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        if inject.returncode:
-            self.log.exit(" x Failed injecting Dolby Vision metadata into HDR10 stream")                  
+    def select_videos_multi(self, ranges: list[str], by_quality=None, by_vbitrate=None) -> None:
+        """Select multiple video tracks for different HDR ranges (e.g., DV+HDR)."""
+        selected = []
+        for r in ranges:
+            temp = Tracks()
+            temp.videos = self.videos.copy()
+            temp.select_videos(by_range=r, by_quality=by_quality, one_only=False)
+            if by_vbitrate:
+                temp.videos = [x for x in temp.videos if int(x.bitrate) <= int(by_vbitrate * 1001)]
+            if temp.videos:
+                best = max(temp.videos, key=lambda x: x.bitrate)
+                selected.append(best)
+        
+        # Include HDR type in uniqueness check
+        unique = {}
+        for v in selected:
+            key = (v.width, v.height, v.codec, v.hdr10, v.dv)
+            if key not in unique or v.bitrate > unique[key].bitrate:
+                unique[key] = v
+        self.videos = list(unique.values())

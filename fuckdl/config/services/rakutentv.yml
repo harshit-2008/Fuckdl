@@ -37,7 +37,7 @@ clients:
     device_model: SM-A105FN
     device_year: 2021
     device_brand: Samsung
-    device_sdk: 29
+    device_sdk: ''
   atvui40:
     app_version: v2.77.0
     device_identifier: atvui40
@@ -47,7 +47,7 @@ clients:
     device_model: SHIELD Android TV
     device_year: 1970
     device_brand: NVIDIA
-    device_sdk: 30
+    device_sdk: ''
   lgui40:
     app_version: v2.77.0
     device_identifier: lgui40
@@ -57,7 +57,7 @@ clients:
     device_model: OLED65C11LB
     device_year: 2021
     device_brand: LG
-    device_sdk: webOS-6.0 #30
+    device_sdk: ''
   smui40:
     app_version: v2.77.0
     device_identifier: smui40
@@ -67,4 +67,4 @@ clients:
     device_model: QE43Q60RATXXH
     device_year: 2019
     device_brand: Samsung
-    device_sdk: Tizen-5-0 #29
+    device_sdk: ''

@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import time
+import uuid
 from datetime import datetime
 
 import click
@@ -12,7 +13,7 @@ import requests
 from fuckdl.objects import Title, Tracks
 from fuckdl.services.BaseService import BaseService
 from fuckdl.utils.regex import find
-from fuckdl.utils.widevine.device import LocalDevice
+
 
 class Peacock(BaseService):
     """
@@ -28,7 +29,7 @@ class Peacock(BaseService):
     """
 
     ALIASES = ["PCOK", "peacock"]
-    GEOFENCE = ["us"]
+    # GEOFENCE = ["us"]
     TITLE_RE = [
         r"(?:https?://(?:www\.)?peacocktv\.com/watch/asset/|/?)(?P<id>movies/[a-z0-9/./-]+/[a-f0-9-]+)",
         r"(?:https?://(?:www\.)?peacocktv\.com/watch/asset/|/?)(?P<id>tv/[a-z0-9/./-]+/[a-f0-9-]+)",
@@ -37,6 +38,9 @@ class Peacock(BaseService):
         r"(?:https?://(?:www\.)?peacocktv\.com/watch/asset/|/?)(?P<id>news/[a-z0-9-/.]+/\d+)",
         r"(?:https?://(?:www\.)?peacocktv\.com/watch/asset/|/?)(?P<id>-/[a-z0-9-/.]+/\d+)",
         r"(?:https?://(?:www\.)?peacocktv\.com/stream-tv/)?(?P<id>[a-z0-9-/.]+)",
+        r"(?:https?://(?:www\.)?peacocktv\.com/watch/asset/|/?)(?P<id>sports/[a-z0-9/./-]+/[a-f0-9-]+)",
+        r"(?:https?://(?:www\.)?peacocktv\.com/watch/asset/|/?)(?P<id>sports/[a-z0-9/./-]+/[a-f0-9-]+)",
+        r"(?:https?://(?:www\.)?peacocktv\.com/watch/asset/|/?)(?P<id>sports/[a-z0-9-/.]+/\d+)",
     ]
 
     @staticmethod
@@ -51,7 +55,7 @@ class Peacock(BaseService):
         super().__init__(ctx)
         self.parse_title(ctx, title)
         self.movie = movie
-        self.cdm = ctx.obj.cdm
+
         self.profile = ctx.obj.profile
 
         self.service_config = None
@@ -61,10 +65,8 @@ class Peacock(BaseService):
         self.license_bt = None
         self.vcodec = ctx.parent.params["vcodec"]
         self.vrange = ctx.parent.params["range_"]
-        
-        if self.vrange in ["HDR10", "DV", "HYBRID"] and self.vcodec != "H265":
-            self.log.info(f" + Switched video codec to H265 to be able to get {self.vrange} dynamic range")
-            self.vcodec = "H265"
+
+        self.cdm = ctx.obj.cdm
 
         self.configure()
 
@@ -126,56 +128,21 @@ class Peacock(BaseService):
                 source=self.ALIASES[0],
                 service_data=x
             ) for x in titles]
-            
+
     def get_tracks(self, title):
-        # Determine which color spaces to request based on vrange parameter
-        color_space_configs = []
-        
+        drm_system = "WIDEVINE"
+        if self.cdm.device.type.name == "PLAYREADY":
+            drm_system = "PLAYREADY"
+
+        supported_colour_spaces = ["SDR"]
+
         if self.vrange == "HDR10":
-            self.log.info("Requesting HDR10 variant")
-            color_space_configs.append(("HDR10", ["HDR10"], "UHD"))
-        elif self.vrange == "DV":
-            self.log.info("Requesting DV variant")
-            # Include HDR10 as fallback
-            color_space_configs.append(("DV", ["DolbyVision", "HDR10"], "UHD"))
-        elif self.vrange == "HYBRID":
-            # Request both DV and HDR10
-            self.log.info("Requesting both DV and HDR10 variants")
-            # For DV request, include HDR10 as fallback
-            color_space_configs.append(("DV", ["DolbyVision", "HDR10"], "UHD"))
-            color_space_configs.append(("HDR10", ["HDR10"], "UHD"))
-        else:
-            # Default SDR
-            color_space_configs.append(("SDR", ["SDR"], "HD"))
-
-        all_tracks = Tracks()
-        audio_added = False
-        subtitles_added = False
-        
-        # Fetch tracks for each color space configuration
-        for range_name, supported_colour_spaces, max_format in color_space_configs:
-            self.log.info(f"Fetching manifest for {range_name}")
-            tracks = self._get_tracks_for_color_space(title, supported_colour_spaces, range_name, max_format)
+            self.log.info("Switched dynamic range to HDR10")
+            supported_colour_spaces = ["HDR10"]
+        if self.vrange == "DV":
+            self.log.info("Switched dynamic range to DV")
+            supported_colour_spaces = ["DolbyVision"]
             
-            # Add video tracks
-            for track in tracks.videos:
-                all_tracks.add(track)
-            
-            # Only add audio and subtitles once (they're the same across variants)
-            if not audio_added:
-                for track in tracks.audios:
-                    all_tracks.add(track)
-                audio_added = True
-                
-            if not subtitles_added:
-                for track in tracks.subtitles:
-                    all_tracks.add(track)
-                subtitles_added = True
-        
-        return all_tracks
-
-    def _get_tracks_for_color_space(self, title, supported_colour_spaces, range_name, max_format):
-        """Helper method to fetch tracks for a specific color space configuration"""
         content_id = title.service_data["attributes"]["formats"]["HD"]["contentId"]
         variant_id = title.service_data["attributes"]["providerVariantId"]
 
@@ -196,32 +163,31 @@ class Peacock(BaseService):
             "device": {
                 "capabilities": [
                     {
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+                        "protection": drm_system,
                         "container": "ISOBMFF",
                         "transport": "DASH",
                         "acodec": "AAC",
                         "vcodec": "H265" if self.vcodec == "H265" else "H264",
                     },
                     {
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+                        "protection": "NONE",
                         "container": "ISOBMFF",
                         "transport": "DASH",
                         "acodec": "AAC",
                         "vcodec": "H265" if self.vcodec == "H265" else "H264",
                     }
                 ],
-                "maxVideoFormat": max_format,  # Use the format passed in
+                "maxVideoFormat": "UHD" if self.vcodec == "H265" else "HD",
                 "supportedColourSpaces": supported_colour_spaces,
                 "model": self.config["client"]["platform"],
                 "hdcpEnabled": "true"
             },
             "client": {
-                "thirdParties": ["FREEWHEEL", "YOSPACE"]
+                "thirdParties": ["FREEWHEEL", "YOSPACE"]  # CONVIVA
             },
             "contentId": content_id,
             "providerVariantId": variant_id,
-            "parentalControlPin": "null",
-            "personaParentalControlRating": 9,
+            "parentalControlPin": "null"
         }, separators=(",", ":"))
 
         manifest = self.session.post(
@@ -239,11 +205,9 @@ class Peacock(BaseService):
                 )
             })
         ).json()
-
         if "errorCode" in manifest:
             raise self.log.exit(f" - An error occurred: {manifest['description']} [{manifest['errorCode']}]")
 
-        # Store license info (will be overwritten if multiple requests, but should be the same)
         self.license_api = manifest["protection"]["licenceAcquisitionUrl"]
         self.license_bt = manifest["protection"]["licenceToken"]
 
@@ -253,100 +217,88 @@ class Peacock(BaseService):
             source=self.ALIASES[0]
         )
         
-        self.log.info(f" + Retrieved {len(tracks.videos)} video tracks for {range_name}")
-        
-        # Tag video tracks with appropriate HDR metadata and make them unique
+        # Fix HDR/DV flags
         for track in tracks.videos:
-            track.needs_proxy = False
-            # Modify the track ID to make it unique per color space
-            # This prevents deduplication when merging tracks
-            if range_name == "HDR10":
-                track.id = f"{track.id}-hdr10"
+            if self.vrange == "HDR10":
                 track.hdr10 = True
-                track.dolbyvision = False
-                # Update the internal range attribute for proper display
-                if hasattr(track, 'range'):
-                    track.range = "HDR10"
-            elif range_name == "DV":
-                track.id = f"{track.id}-dv"
-                track.dolbyvision = True
-                track.hdr10 = False
-                # Update the internal range attribute for proper display
-                if hasattr(track, 'range'):
-                    track.range = "DV"
-            else:
-                track.hdr10 = False
-                track.dolbyvision = False
+                track.hdr = True
+            elif self.vrange == "DV":
+                track.dolby_vision = True
+                track.hdr = True
+                
+        for track in tracks:
+            track.needs_proxy = False
 
         for track in tracks.audios:
-            track.needs_proxy = False
             if track.language.territory == "AD":
-                # This is supposed to be Audio Description, not Andorra
                 track.language.territory = None
-
-        for track in tracks.subtitles:
-            track.needs_proxy = False
+                track.extra = {"audio_description": True}
 
         return tracks
 
     def get_chapters(self, title):
         return []
-        
+
     def certificate(self, challenge, **_):
-        return [] if self.cdm.device.type == LocalDevice.Types.PLAYREADY else self.license(challenge)
+        return self.license(challenge)
 
     def license(self, challenge, **_):
-        if self.cdm.device.type == LocalDevice.Types.PLAYREADY:
-            request = self.session.post(
-                url=self.license_api,
-                headers={
-                    "Accept": "*",
-                    "X-Sky-Signature": self.create_signature_header(
-                        method="POST",
-                        path="/" + self.license_api.split("://", 2)[1].split("/", 1)[1],
-                        sky_headers={},
-                        body="",
-                        timestamp=int(time.time())
-                    )
-                },
-                data=challenge
-            )
-            return request.content
-        else:
-            return self.session.post(
-                url=self.license_api,
-                headers={
-                    "Accept": "*",
-                    "X-Sky-Signature": self.create_signature_header(
-                        method="POST",
-                        path="/" + self.license_api.split("://", 1)[1].split("/", 1)[1],
-                        sky_headers={},
-                        body="",
-                        timestamp=int(time.time())
-                    )
-                },
-                data=challenge
-            ).content
+        return self.session.post(
+            url=self.license_api,
+            headers={
+                "Accept": "*",
+                "X-Sky-Signature": self.create_signature_header(
+                    method="POST",
+                    path="/" + self.license_api.split("://", 1)[1].split("/", 1)[1],
+                    sky_headers={},
+                    body="",
+                    timestamp=int(time.time())
+                )
+            },
+            data=challenge
+        ).content
+
+    # Service specific functions
 
     def configure(self):
-        self.session.headers.update({"Origin": "https://www.peacocktv.com"})
+        self.session.headers.update({
+            "Origin": "https://www.peacocktv.com",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        
         self.log.info("Getting Peacock Client configuration")
+        
+        # Verificar cookies
+        cookie_count = len(self.session.cookies)
+        self.log.info(f"Loaded {cookie_count} cookies")
+        
+        # Mostrar cookies importantes
+        important_cookies = ["peacock_active_profile", "X-pwa-session-token", "st", "ak_bmsc", "bm_sv", "bm_mi"]
+        for cookie in self.session.cookies:
+            if any(important in cookie.name for important in important_cookies):
+                self.log.debug(f"Found cookie: {cookie.name} = {cookie.value[:30]}...")
+        
         if self.config["client"]["platform"] != "PC":
-            self.service_config = self.session.get(
-                url=self.config["endpoints"]["config"].format(
-                    territory=self.config["client"]["territory"],
-                    provider=self.config["client"]["provider"],
-                    proposition=self.config["client"]["proposition"],
-                    device=self.config["client"]["platform"],
-                    version=self.config["client"]["config_version"],
-                )
-            ).json()
+            try:
+                self.service_config = self.session.get(
+                    url=self.config["endpoints"]["config"].format(
+                        territory=self.config["client"]["territory"],
+                        provider=self.config["client"]["provider"],
+                        proposition=self.config["client"]["proposition"],
+                        device=self.config["client"]["platform"],
+                        version=self.config["client"]["config_version"],
+                    )
+                ).json()
+                self.log.debug("Service config loaded successfully")
+            except Exception as e:
+                self.log.warning(f"Could not load service config: {e}")
+        
         self.hmac_key = bytes(self.config["security"]["signature_hmac_key_v4"], "utf-8")
         self.log.info("Getting Authorization Tokens")
         self.tokens = self.get_tokens()
         self.log.info("Verifying Authorization Tokens")
         if not self.verify_tokens():
-            raise self.log.exit(" - Failed! Cookies might be outdated.")
+            raise self.log.exit(" - Token verification failed! Cookies might be outdated or invalid.")
 
     @staticmethod
     def calculate_sky_header_md5(headers):
@@ -368,7 +320,7 @@ class Peacock(BaseService):
         data = "\n".join([
             method.upper(),
             path,
-            "",
+            "",  # important!
             self.config["client"]["client_sdk"],
             "1.0",
             self.calculate_sky_header_md5(sky_headers),
@@ -385,6 +337,7 @@ class Peacock(BaseService):
         )
 
     def get_tokens(self):
+        # Try to get cached tokens
         tokens_cache_path = self.get_cache("tokens_{profile}_{id}.json".format(
             profile=self.profile,
             id=self.config["client"]["id"]
@@ -393,54 +346,182 @@ class Peacock(BaseService):
             with open(tokens_cache_path, encoding="utf-8") as fd:
                 tokens = json.load(fd)
             tokens_expiration = tokens.get("tokenExpiryTime", None)
-            if tokens_expiration and datetime.strptime(tokens_expiration, "%Y-%m-%dT%H:%M:%S.%fZ") > datetime.now():
-                return tokens
+            if tokens_expiration:
+                try:
+                    expiry_time = datetime.strptime(tokens_expiration, "%Y-%m-%dT%H:%M:%S.%fZ")
+                    if expiry_time > datetime.now():
+                        self.log.info("Using cached tokens (valid until {})".format(
+                            expiry_time.strftime("%Y-%m-%d %H:%M:%S")
+                        ))
+                        return tokens
+                except ValueError:
+                    pass  # Fall through to get new tokens
 
+        # Get persona ID from cybertron endpoint
+        try:
+            self.log.info("Getting persona ID from cybertron endpoint...")
+            
+            # Headers para el endpoint cybertron
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Referer": "https://www.peacocktv.com/",
+                "Origin": "https://www.peacocktv.com",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            
+            response = self.session.get(
+                url=self.config["endpoints"]["personas"],
+                headers=headers,
+                timeout=30
+            )
+            
+            self.log.debug(f"Personas response status: {response.status_code}")
+            
+            if response.status_code == 401:
+                raise self.log.exit(" - Authentication failed (401). Cookies are expired or invalid.")
+            
+            if response.status_code == 403:
+                raise self.log.exit(" - Access forbidden (403). Check your IP address (must be US).")
+            
+            if response.status_code != 200:
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("message", f"HTTP {response.status_code}")
+                    error_code = error_data.get("code", "")
+                    raise self.log.exit(f" - Personas error: {error_msg} [{error_code}]")
+                except:
+                    raise self.log.exit(f" - HTTP Error {response.status_code}: {response.reason}")
+            
+            personas = response.json()
+            self.log.debug(f"Personas response: {json.dumps(personas, indent=2)[:500]}...")
+            
+            # El endpoint cybertron podría devolver diferentes estructuras
+            if isinstance(personas, list):
+                personas_list = personas
+            elif "personas" in personas:
+                personas_list = personas["personas"]
+            elif "data" in personas:
+                personas_list = personas["data"]
+            else:
+                personas_list = [personas]  # Asumir que es un solo objeto
+            
+            if not personas_list:
+                raise self.log.exit(" - No personas found in response.")
+            
+            # Extraer personaId del primer elemento
+            if isinstance(personas_list[0], dict):
+                persona = personas_list[0].get("personaId") or personas_list[0].get("id") or personas_list[0].get("persona")
+            else:
+                persona = str(personas_list[0])
+                
+            if not persona:
+                raise self.log.exit(" - Could not extract persona ID from response")
+                
+            self.log.info(f"Got persona ID: {persona[:12]}...")
+            
+        except requests.exceptions.Timeout:
+            raise self.log.exit(" - Timeout connecting to Peacock servers")
+        except requests.RequestException as e:
+            raise self.log.exit(f" - Network error: {str(e)}")
+        except Exception as e:
+            raise self.log.exit(f" - Failed to get persona ID: {str(e)}")
+
+        # Generate device ID if needed
+        device_id = self.config["client"]["id"]
+        if device_id == "Jcvf1y0whKOI29vRXcJy":  # Default ID
+            device_id = f"web-{hashlib.md5(str(uuid.uuid4()).encode()).hexdigest()[:16]}"
+            
+        drm_device_id = self.config["client"]["drm_device_id"]
+        if drm_device_id == "UNKNOWN":
+            drm_device_id = f"drm-{hashlib.md5(str(uuid.uuid4()).encode()).hexdigest()[:16]}"
+
+        # Get SkyOTT headers for tokens request
         sky_headers = {
-            "X-SkyOTT-Agent": ".".join([
-                self.config["client"]["proposition"],
-                self.config["client"]["device"],
-                self.config["client"]["platform"]
-            ]).lower(),
             "X-SkyOTT-Device": self.config["client"]["device"],
             "X-SkyOTT-Platform": self.config["client"]["platform"],
             "X-SkyOTT-Proposition": self.config["client"]["proposition"],
             "X-SkyOTT-Provider": self.config["client"]["provider"],
-            "X-SkyOTT-Territory": self.config["client"]["territory"]
+            "X-SkyOTT-Territory": self.config["client"]["territory"],
+            "X-SkyOTT-Language": "en"
         }
 
+        # Craft the body data for tokens
         body = json.dumps({
             "auth": {
                 "authScheme": self.config["client"]["auth_scheme"],
                 "authIssuer": self.config["client"]["auth_issuer"],
                 "provider": self.config["client"]["provider"],
                 "providerTerritory": self.config["client"]["territory"],
-                "proposition": self.config["client"]["proposition"],                
+                "proposition": self.config["client"]["proposition"],
+                "personaId": persona
             },
             "device": {
                 "type": self.config["client"]["device"],
                 "platform": self.config["client"]["platform"],
-                "id": self.config["client"]["id"],
-                "drmDeviceId": self.config["client"]["drm_device_id"]
+                "id": device_id,
+                "drmDeviceId": drm_device_id
             }
         }, separators=(",", ":"))
 
-        tokens = self.session.post(
-            url=self.config["endpoints"]["tokens"],
-            headers=dict(**sky_headers, **{
+        self.log.info("Getting authentication tokens...")
+        
+        # Get the tokens
+        try:
+            timestamp = int(time.time())
+            
+            # Headers para tokens endpoint
+            token_headers = {
                 "Accept": "application/vnd.tokens.v1+json",
                 "Content-Type": "application/vnd.tokens.v1+json",
-                "X-Sky-Signature": self.create_signature_header(
-                    method="POST",
-                    path="/auth/tokens",
-                    sky_headers=sky_headers,
-                    body=body,
-                    timestamp=int(time.time())
-                )
-            }),
-            data=body
-        ).json()
+                "Referer": "https://www.peacocktv.com/",
+                "Origin": "https://www.peacocktv.com"
+            }
+            token_headers.update(sky_headers)
+            token_headers["X-SkyOTT-Agent"] = ".".join([
+                self.config["client"]["proposition"],
+                self.config["client"]["device"],
+                self.config["client"]["platform"]
+            ]).lower()
+            
+            signature = self.create_signature_header(
+                method="POST",
+                path="/auth/tokens",
+                sky_headers=sky_headers,
+                body=body,
+                timestamp=timestamp
+            )
+            
+            token_headers["X-Sky-Signature"] = signature
+            
+            tokens_response = self.session.post(
+                url=self.config["endpoints"]["tokens"],
+                headers=token_headers,
+                data=body,
+                timeout=30
+            )
+            
+            if tokens_response.status_code != 200:
+                try:
+                    error_data = tokens_response.json()
+                    error_msg = error_data.get("message", f"HTTP {tokens_response.status_code}")
+                    error_code = error_data.get("code", "")
+                    raise self.log.exit(f" - Tokens error: {error_msg} [{error_code}]")
+                except:
+                    raise self.log.exit(f" - HTTP Error {tokens_response.status_code}: {tokens_response.reason}")
+            
+            tokens = tokens_response.json()
+            
+            if "userToken" not in tokens:
+                raise self.log.exit(" - Invalid tokens response: missing 'userToken'")
+            
+            self.log.info("Successfully obtained authentication tokens")
+            self.log.debug(f"UserToken: {tokens['userToken'][:20]}...")
+            
+        except Exception as e:
+            raise self.log.exit(f" - Failed to get tokens: {str(e)}")
 
+        # Cache the tokens
         os.makedirs(os.path.dirname(tokens_cache_path), exist_ok=True)
         with open(tokens_cache_path, "w", encoding="utf-8") as fd:
             json.dump(tokens, fd)
@@ -448,30 +529,59 @@ class Peacock(BaseService):
         return tokens
 
     def verify_tokens(self):
+        """Verify the tokens by calling the /auth/users/me endpoint"""
         sky_headers = {
             "X-SkyOTT-Device": self.config["client"]["device"],
             "X-SkyOTT-Platform": self.config["client"]["platform"],
             "X-SkyOTT-Proposition": self.config["client"]["proposition"],
             "X-SkyOTT-Provider": self.config["client"]["provider"],
             "X-SkyOTT-Territory": self.config["client"]["territory"],
+            "X-SkyOTT-Language": "en",
             "X-SkyOTT-UserToken": self.tokens["userToken"]
         }
+        
         try:
-            self.session.get(
-                url=self.config["endpoints"]["me"],
-                headers=dict(**sky_headers, **{
-                    "Accept": "application/vnd.userinfo.v2+json",
-                    "Content-Type": "application/vnd.userinfo.v2+json",
-                    "X-Sky-Signature": self.create_signature_header(
-                        method="GET",
-                        path="/auth/users/me",
-                        sky_headers=sky_headers,
-                        body="",
-                        timestamp=int(time.time())
-                    )
-                })
+            timestamp = int(time.time())
+            
+            headers = {
+                "Accept": "application/vnd.userinfo.v2+json",
+                "Content-Type": "application/vnd.userinfo.v2+json",
+                "Referer": "https://www.peacocktv.com/",
+                "Origin": "https://www.peacocktv.com"
+            }
+            headers.update(sky_headers)
+            headers["X-SkyOTT-Agent"] = ".".join([
+                self.config["client"]["proposition"],
+                self.config["client"]["device"],
+                self.config["client"]["platform"]
+            ]).lower()
+            
+            signature = self.create_signature_header(
+                method="GET",
+                path="/auth/users/me",
+                sky_headers=sky_headers,
+                body="",
+                timestamp=timestamp
             )
-        except requests.HTTPError:
+            
+            headers["X-Sky-Signature"] = signature
+            
+            response = self.session.get(
+                url=self.config["endpoints"]["me"],
+                headers=headers,
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                user_info = response.json()
+                self.log.info(f"Token verification successful. User: {user_info.get('username', 'Unknown')}")
+                return True
+            else:
+                self.log.warning(f"Token verification failed: HTTP {response.status_code}")
+                if response.status_code == 401:
+                    self.log.warning("Token might be expired or invalid")
+                return False
+                
+        except Exception as e:
+            self.log.warning(f"Token verification error: {str(e)}")
             return False
-        else:
-            return True

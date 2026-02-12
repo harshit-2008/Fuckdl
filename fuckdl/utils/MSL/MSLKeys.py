@@ -8,3 +8,4 @@ class MSLKeys(MSLObject):
         self.rsa = rsa
         self.mastertoken = mastertoken
         self.cdm_session = cdm_session
+

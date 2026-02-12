@@ -4,11 +4,11 @@ import argparse
 import json
 import sqlite3
 
-from fuckdl.utils.AtomicSQL import AtomicSQL
+from vinetrimmer.utils.AtomicSQL import AtomicSQL
 
 parser = argparse.ArgumentParser(
     "Key Store DB merger",
-    description="Simple script to merge fuckdl key store db's into one"
+    description="Simple script to merge vinetrimmer key store db's into one"
 )
 parser.add_argument(
     "-i", "--input",

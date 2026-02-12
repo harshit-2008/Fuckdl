@@ -400,3 +400,4 @@ class MSL:
         :return: Base64 encoded signature
         """
         return base64.b64encode(HMAC.new(self.keys.sign, text.encode("utf-8"), SHA256).digest())
+

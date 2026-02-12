@@ -5,7 +5,7 @@ import base64
 
 import yaml
 
-from fuckdl.utils.widevine.protos.widevine_pb2 import ClientIdentificationRaw
+from vinetrimmer.utils.widevine.protos.widevine_pb2 import ClientIdentificationRaw
 
 parser = argparse.ArgumentParser("Widevine Client ID building tool.")
 parser.add_argument("-q", "--quiet",

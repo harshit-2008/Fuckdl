@@ -24,7 +24,7 @@ from pyplayready.license.xmrlicense import XMRLicense, XMRObjectTypes
 from pyplayready.exceptions import (InvalidSession, TooManySessions, InvalidLicense, ServerException)
 from pyplayready.system.session import Session
 from pyplayready.system.wrmheader import WRMHeader
-from fuckdl.utils.widevine.device import LocalDevice
+from vinetrimmer.utils.widevine.device import LocalDevice
 
 class Cdm:
     MAX_NUM_OF_SESSIONS = 16

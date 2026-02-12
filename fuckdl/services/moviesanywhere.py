@@ -57,11 +57,6 @@ class MoviesAnywhere(BaseService):
         self.atmos = ctx.parent.params["atmos"]
         self.vcodec = ctx.parent.params["vcodec"]
         self.acodec = ctx.parent.params["acodec"]
-        self.range = ctx.parent.params["range_"]
-        
-        if self.range in ("HDR10", "DV", "HYBRID") and self.vcodec != "H265":
-            self.log.info(f" + Switched video codec to H265 to be able to get {self.range} dynamic range")
-            self.vcodec = "H265"
 
     def get_titles(self):
         self.headers={
@@ -116,61 +111,31 @@ class MoviesAnywhere(BaseService):
         player_data = self.content["data"]["page"]["components"][0]["mainAction"]["playerData"]["playable"]
         videos = []
         audios = []
-        
-        # Handle HYBRID mode - fetch both Dolby Vision and HDR10 tracks
-        if self.range == "HYBRID":
-            for manifest_type in ["hevcDolbyVision", "hevcHdr10"]:
-                manifest_list = player_data["videoAssets"]["dash"].get(manifest_type)
-                if not manifest_list:
-                    continue
-                    
-                for manifest in manifest_list:
-                    tracks = Tracks.from_mpd(
-                        url=manifest["url"],
-                        source=self.ALIASES[0],
-                        session=self.session,
-                    )
+        for cr in player_data["videoAssets"]["dash"].values():
+            if not cr:
+                continue
+            for manifest in cr:
+                tracks = Tracks.from_mpd(
+                    url=manifest["url"],
+                    source=self.ALIASES[0],
+                    session=self.session,
+                )
 
-                    for video in tracks.videos:
-                        video.license_url = manifest["playreadyLaUrl"] if self.playready else manifest["widevineLaUrl"]
-                        video.contentId = URL(video.license_url).params._dict["ContentId"][0]
-                        
-                        if manifest_type == "hevcDolbyVision":
-                            video.dv = True
-                        elif manifest_type == "hevcHdr10":
-                            video.hdr10 = True
-                            
-                        videos.append(video)
-                        
-                    for audio in tracks.audios:
-                        audio.license_url = manifest["playreadyLaUrl"] if self.playready else manifest["widevineLaUrl"]
-                        audio.contentId = URL(audio.license_url).params._dict["ContentId"][0]
-                        if "atmos" in audio.url:
-                            audio.atmos = True
-                        audios.append(audio)
-        else:
-            # Single range mode (original behavior from Document 1)
-            for cr in player_data["videoAssets"]["dash"].values():
-                if not cr:
-                    continue
-                for manifest in cr:
-                    tracks = Tracks.from_mpd(
-                        url=manifest["url"],
-                        source=self.ALIASES[0],
-                        session=self.session,
-                    )
-
-                    for video in tracks.videos:
-                        video.license_url = manifest["playreadyLaUrl"] if self.playready else manifest["widevineLaUrl"]
-                        video.contentId = URL(video.license_url).params._dict["ContentId"][0]
-                        videos += [video]
-                        
-                    for audio in tracks.audios:
-                        audio.license_url = manifest["playreadyLaUrl"] if self.playready else manifest["widevineLaUrl"]
-                        audio.contentId = URL(audio.license_url).params._dict["ContentId"][0]
-                        if "atmos" in audio.url:
-                            audio.atmos = True
-                        audios += [audio]
+                for video in tracks.videos:
+                    video.license_url = manifest["playreadyLaUrl"] if self.playready else manifest["widevineLaUrl"]
+                    video.contentId = URL(video.license_url).params._dict["ContentId"][
+                        0
+                    ]
+                    videos += [video]
+                # Extract Atmos audio track if available.
+                for audio in tracks.audios:
+                    audio.license_url = manifest["playreadyLaUrl"] if self.playready else manifest["widevineLaUrl"]
+                    audio.contentId = URL(audio.license_url).params._dict["ContentId"][
+                        0
+                    ]
+                    if "atmos" in audio.url:
+                        audio.atmos = True
+                    audios += [audio]
 
         corrected_video_list = []
         for res in ("uhd", "hdp", "hd", "sd"):
@@ -192,7 +157,6 @@ class MoviesAnywhere(BaseService):
 
                 corrected_video_list += [video]
 
-        tracks = Tracks()
         tracks.add(corrected_video_list)
         tracks.audios = audios
         tracks.videos = [x for x in tracks.videos if (x.codec or "")[:3] in self.VIDEO_CODEC_MAP[self.vcodec]]
@@ -236,3 +200,4 @@ class MoviesAnywhere(BaseService):
                 "Authorization": f"Bearer {self.access_token}",
             }
         )
+

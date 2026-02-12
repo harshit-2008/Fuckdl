@@ -6,7 +6,6 @@ import unicodedata
 from datetime import timedelta
 
 import langcodes
-from ftfy import fix_encoding
 
 from subby import regex as Regex
 from subby.processors.base import BaseProcessor
@@ -18,26 +17,16 @@ from subby.utils.time import line_duration
 class CommonIssuesFixer(BaseProcessor):
     """Processor fixing common issues found in subtitles"""
 
-    remove_gaps: bool = True
+    remove_gaps = True
 
     def process(self, srt, language=None):
-        lang_code = langcodes.get(language).language if language else None
         fixed = self._fix_time_codes(copy.deepcopy(srt))
         corrected = self._correct_subtitles(fixed)
 
-        if lang_code in RTL_LANGUAGES:
+        if language and langcodes.get(language).language in RTL_LANGUAGES:
             corrected, _ = RTLFixer().process(corrected, language=language)
 
-        if lang_code == 'en':
-            corrected = self._normalize_unicode(corrected)
-
         return corrected, corrected != srt
-
-    def _normalize_unicode(self, srt: SubRipFile) -> SubRipFile:
-        """Normalizes Unicode characters"""
-        for line in srt:
-            line.content = unicodedata.normalize('NFKC', line.content)
-        return srt
 
     def _correct_subtitles(self, srt: SubRipFile) -> SubRipFile:
         def _fix_line(line):
@@ -49,13 +38,11 @@ class CommonIssuesFixer(BaseProcessor):
             line = re.sub(r'\n\s*', '\n', line)
             #
             # [ENCODING FIXES, CHARACTER REPLACEMENTS]
-            # Fix various encoding issues in the source using ftfy
-            # e.g. â™ª -> ♪, protÃ©gÃ© -> protégé
-            line = fix_encoding(line)
-            # Replace paragraph start (pilcrow) with a musical note
-            # (This is extremely unlikely to occur in any other context
-            # and there are samples with this in the wild)
-            line = line.replace(r'¶', r'♪')
+            # Fix musical notes garbled by encoding
+            # has to happen before normalization as that replaces the TM char
+            line = line.replace(r'â™ª', '♪')
+            # Normalize unicode characters
+            line = unicodedata.normalize('NFKC', line)
             # Replace short hyphen with regular size
             line = line.replace(r'‐', r'-')
             # Replace double note with single note
@@ -130,15 +117,15 @@ class CommonIssuesFixer(BaseProcessor):
             line = re.sub(r'<[a-z]>\s*</[a-z]>', r'', line)
             # Move "{\an8}" to the rest of the text if it's on a new line
             line = re.sub(r'({\\an8\})\n', r'\1', line)
-            # Add closing italics tag if the line lacks one
-            if (m := re.search(r'^(?:{\\an8\})?<([a-z])>', line)) \
-                    and (end := f'</{m[1]}>') not in line:
-                line += end
 
             # [REFORMATTING]
             #
             # Remove spaces inside brackets ("( TEXT )" -> "(TEXT)")
             line = re.sub(r'\( (.*) \)', r'(\1)', line)
+            # Remove ">> " before text
+            line = re.sub(r'(^|\n)(</?[a-z]>|\{\\an8\})?>> ', r'\1\2', line)
+            # Remove lines consisting only of ">>"
+            line = re.sub(r'(^|\n)(</?[a-z]>|\{\\an8\})?>>($|\n)', r'', line)
             # Replace any leftover <br> tags with a proper line break
             line = re.sub(r'<br ?\/?>', '\n', line)
             # Remove empty lines
@@ -160,7 +147,7 @@ class CommonIssuesFixer(BaseProcessor):
             )
             line = re.sub(r'\.{2,}' rf'({Regex.TAGS})?' r'\s*$', r'...\1', line, flags=re.M)
             # Add space after frontal speaker hyphen
-            line = re.sub(r"^(<i>|\{\\an8\})?-+(?='?[\w\"\[\(\<\{\.\$♪¿¡])", r'\1- ', line, flags=re.M)
+            line = re.sub(r"^(<i>|\{\\an8\})?-+(?='?[\w\"\[\(\<\{\.\$♪])", r'\1- ', line, flags=re.M)
             # Remove unnecessary space before "--"
             line = re.sub(r'\s*--(\s*)', r'--\1', line, flags=re.M)
             # Move notes inside tags (</i> ♪ -> </i>)
@@ -204,17 +191,12 @@ class CommonIssuesFixer(BaseProcessor):
             # Remove remaining linebreaks
             line.content = line.content.strip('\n')
 
-        # Remove italics/an8 if every line has them, as this is almost certainly a mistake
+        # Remove italics if every line is italicized, as this is almost certainly a mistake
         # (using slices should be more performant than regex or startswith/endswith)
         if len(srt) > 10 \
                 and all(line.content[:3] == '<i>' and line.content[-4:] == '</i>' for line in srt):
             for line in srt:
                 line.content = line.content[3:-4]
-        # Using a higher threshold for an8, as it's entirely plausible for forced subs to be all an8
-        # (all lines set to an8 to avoid hardsubs is a possible edge case, but much less likely)
-        if len(srt) > 100 and all(line.content[:6] == r'{\an8}' for line in srt):
-            for line in srt:
-                line.content = line.content[6:]
 
         combined = self._combine_timecodes(srt)
         if self.remove_gaps:
@@ -233,7 +215,7 @@ class CommonIssuesFixer(BaseProcessor):
                     and subs_copy[-1].start == line.start \
                     and subs_copy[-1].end == line.end:
                 if subs_copy[-1].content != line.content:
-                    subs_copy[-1].content += '\n' + line.content.replace('{\\an8}', '')
+                    subs_copy[-1].content += '\n' + line.content
             # Merge lines with the same text within 10 ms
             elif self._subtract_ts(line.start, subs_copy[-1].end) < 10 \
                     and line.content == subs_copy[-1].content:
@@ -265,7 +247,8 @@ class CommonIssuesFixer(BaseProcessor):
                 continue
             # Remove 2-frame or smaller gaps (2 frames/83ms@24 is Netflix standard)
             elif 1 < self._subtract_ts(line.start, subs_copy[-1].end) <= 85:
-                subs_copy[-1].end = line.start - timedelta(milliseconds=1)
+                line.start = subs_copy[-1].end
+                subs_copy[-1].end -= timedelta(milliseconds=1)
                 subs_copy.append(line)
             elif line.content.strip():
                 subs_copy.append(line)

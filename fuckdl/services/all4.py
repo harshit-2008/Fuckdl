@@ -141,7 +141,7 @@ class All4(BaseService):
 
         for track in tracks.audios:
             role = track.extra[1].find("Role")
-            if role is not None and role.get("value") in ["description", "alternative", "alternate"]:
+            if role is not None and role.get("value") == "alternative":
                 track.descriptive = True
 
         return tracks
@@ -235,3 +235,4 @@ class All4(BaseService):
         data = cipher.decrypt(token)[:-2]
         license_api, dec_token = data.decode().split("|")
         return dec_token.strip(), license_api.strip()
+

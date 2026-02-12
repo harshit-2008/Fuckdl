@@ -7,7 +7,6 @@ from pathlib import Path
 import click
 import m3u8
 import requests
-import base64
 import jsonpickle
 
 from fuckdl.objects import Title, Tracks
@@ -23,7 +22,7 @@ class ParamountPlus(BaseService):
 
     \b
     Authorization: Credentials
-    Security: UHD@L1/SL2000 FHD@L3, doesn't care about releases.
+    Security: UHD@L3, doesn't care about releases.
     """
 
     ALIASES = ["PMTP", "paramountplus", "paramount+"]
@@ -51,7 +50,7 @@ class ParamountPlus(BaseService):
     def __init__(self, ctx: click.Context, title: str, movie: bool, clips: bool):
         super().__init__(ctx)
         m = self.parse_title(ctx, title)
-        self.movie = movie or m.get("type") == "movies"
+        self.movie = movie #or m.get("type") == "movies"
         self.clips = clips
 
         self.vcodec = ctx.parent.params["vcodec"]
@@ -60,8 +59,8 @@ class ParamountPlus(BaseService):
         self.wanted = ctx.parent.params["wanted"]
         self.shorts = False
         
+        self.cdm = ctx.obj.cdm
         self.profile = ctx.obj.profile
-        self.playready = ctx.obj.cdm.device.type == LocalDevice.Types.PLAYREADY
 
         ctx.parent.params["acodec"] = "EC3"
 
@@ -73,6 +72,7 @@ class ParamountPlus(BaseService):
 
     def get_titles(self):
         if self.movie:
+            self.title = self.title.split('/movies/')[-1].split('/')[0]
             res = self.session.get(
                 url=self.config[self.region]["movie"].format(title_id=self.title),
                 params={
@@ -100,6 +100,7 @@ class ParamountPlus(BaseService):
                 service_data=title,
             )
         else:
+            self.title = self.title.split('/shows/')[-1].split('/')[0]
             res = self.session.get(
                 url=self.config[self.region]["shows"].format(title=self.title)
             ).json()
@@ -159,7 +160,7 @@ class ParamountPlus(BaseService):
 
     def get_tracks(self, title: Title):
         assets = (
-            ["DASH_CENC_HDR"],
+            ["DASH_CENC_HDR10"],
             [
                 "HLS_AES",
                 "DASH_LIVE",
@@ -217,15 +218,12 @@ class ParamountPlus(BaseService):
             },
         )
         hls_url = req.url
-        
-        try:
-            tracks_m3u8 = Tracks.from_m3u8(
-                m3u8.load(hls_url),
-                source=self.ALIASES[0],
-            )
-            tracks.subtitles = tracks_m3u8.subtitles
-        except Exception:
-            self.log.warn("Unable to download HLS manifest for subtitles")
+
+        tracks_m3u8 = Tracks.from_m3u8(
+            m3u8.load(hls_url),
+            source=self.ALIASES[0],
+        )
+        tracks.subtitles = tracks_m3u8.subtitles
 
         for track in tracks:
             # track.id = track.id
@@ -294,10 +292,10 @@ class ParamountPlus(BaseService):
     def license(self, challenge, title, **_):
         contentId = title.service_data.get("contentId") or title.service_data.get("content_id")
         if not contentId:
-            raise self.log.exit("Error")
+            raise ValueError("Error")
 
         r = self.session.post(
-            url=self.config["license_pr"] if self.playready else self.config["license_wv"],
+            url=self.config["license_pr"] if self.cdm.device.type == LocalDevice.Types.PLAYREADY else self.config["license_wv"],
             params={
                 "CrmId": "cbsi",
                 "AccountId": "cbsi",
@@ -310,65 +308,64 @@ class ParamountPlus(BaseService):
 
         if r.headers["Content-Type"].startswith("application/json"):
             res = r.json()
-            raise self.log.exit(res["message"])
+            raise ValueError(res["message"])
 
-        return base64.b64encode(r.content).decode() if self.playready else r.content
+        return r.content
 
     def configure(self):
         self.region = self.session.get("https://ipinfo.io/json").json()["country"]
+        if self.region != "US":
+            if self.region != "FR":
+                self.region = "INTL"
 
-        if self.region != "FR" and self.region != "US":
-            self.region = "INTL"
-        
-        if self.playready:
-            if self.region == "US":
-                self.device = self.config["devices"]["xbox-one"]
-            else:
-                self.device = self.config["devices"]["android-phone"]
-        else:
-            self.device = self.config["devices"]["android-phone"]
+            #self.device_cache_path = Path(self.get_cache("device_tokens_{profile}.json".format(
+            #profile=self.profile,
+            #)))
 
-        #self.device_cache_path = Path(self.get_cache("device_tokens_{profile}.json".format(
-        #profile=self.profile,
-        #)))
-
-        #if self.device_cache_path.exists():
-            #with open(self.device_cache_path, encoding="utf-8") as fd:
-                #date = jsonpickle.decode(fd.read())  
-            #if "expiry" in date and datetime.fromisoformat(date["expiry"]) > datetime.now():
-                #self.log.warning(" + Using cached device tokens")
-                #cache = date
+            #if self.device_cache_path.exists():
+                #with open(self.device_cache_path, encoding="utf-8") as fd:
+                    #date = jsonpickle.decode(fd.read())  
+                #if "expiry" in date and datetime.fromisoformat(date["expiry"]) > datetime.now():
+                    #self.log.warning(" + Using cached device tokens")
+                    #cache = date
+                #else:
+                    #self.log.warning(" + Refreshing cookies")
+                    #self.device_cache_path.unlink()
+                    #if not self.credentials:
+                        #raise self.log.exit(" - No credentials provided, unable to log in.")
+                    #self.session.headers.update({"user-agent": self.config["Android"]["UserAgent"]})
+                    #self.session.params.update({"at": self.config[self.region]["at_token"]})
+                    #username = self.credentials.username
+                    #password = self.credentials.password
+                    #expiry = (datetime.now() + timedelta(minutes=3)).isoformat()
+                    #cookie = self.login(username=username, password=password)
+                    #cache = {"cookie": cookie, "expiry": expiry}
+                    #self.device_cache_path.parent.mkdir(exist_ok=True, parents=True)
+                    #with open(self.device_cache_path, "w", encoding="utf-8") as fd:
+                        #fd.write(jsonpickle.encode(cache))
             #else:
-                #self.log.warning(" + Refreshing cookies")
-                #self.device_cache_path.unlink()
-                #if not self.credentials:
-                    #raise self.log.exit(" - No credentials provided, unable to log in.")
-                #self.session.headers.update({"user-agent": self.config["Android"]["UserAgent"]})
-                #self.session.params.update({"at": self.config[self.region]["at_token"]})
-                #username = self.credentials.username
-                #password = self.credentials.password
-                #expiry = (datetime.now() + timedelta(minutes=3)).isoformat()
-                #cookie = self.login(username=username, password=password)
+            if not self.credentials:
+                raise self.log.exit(" - No credentials provided, unable to log in.")
+            self.log.warning(" + Logging in")
+            self.session.headers.update({"user-agent": self.config["Android"]["UserAgent"]})
+            self.session.params.update({"at": self.config[self.region]["at_token"]})
+            username = self.credentials.username
+            password = self.credentials.password
+            #expiry = (datetime.now() + timedelta(minutes=3)).isoformat()
+            cookie = self.login(username=username, password=password)
                 #cache = {"cookie": cookie, "expiry": expiry}
                 #self.device_cache_path.parent.mkdir(exist_ok=True, parents=True)
                 #with open(self.device_cache_path, "w", encoding="utf-8") as fd:
                     #fd.write(jsonpickle.encode(cache))
-        #else:
-        if not self.credentials:
-            raise self.log.exit(" - No credentials provided, unable to log in.")
-        self.log.warning(" + Logging in")
-        self.session.headers.update({"user-agent": self.device["user_agent"]})
-        self.session.params.update({"at": self.config[self.region]["at_token"]})
-        username = self.credentials.username
-        password = self.credentials.password
-            #expiry = (datetime.now() + timedelta(minutes=3)).isoformat()
-        cookie = self.login(username=username, password=password)
-            #cache = {"cookie": cookie, "expiry": expiry}
-            #self.device_cache_path.parent.mkdir(exist_ok=True, parents=True)
-            #with open(self.device_cache_path, "w", encoding="utf-8") as fd:
-                #fd.write(jsonpickle.encode(cache))
-        #cookie = cache["cookie"]
-        self.session.headers.update({"cookie": cookie})
+            #cookie = cache["cookie"]
+            self.session.headers.update({"cookie": cookie})
+        else:
+            self.session.headers.update(
+                {
+                    "Origin": "https://www.paramountplus.com",
+                }
+            )
+            self.session.params.update({"at": self.config[self.region]["at_token"]})
 
         #if not self.is_logged_in():
             #raise ValueError("InvalidCookies")
@@ -394,32 +391,17 @@ class ParamountPlus(BaseService):
         return self.get_prop("CBS.Registry.user.sub_status") == "SUBSCRIBER"
     
     def login(self, username, password):
-        if self.region == "US":
-            querystring = {
-                "locale": "en-us",
-                "at": self.config[self.region]["at_token"]
-            }
-            
-            payload = {
-                "j_username": username,
-                "j_password": password,
-                "deviceId": self.device["id"] #"8c9442c5e2171c2a"
-            }
+        login_params = {
+            "j_username": username,
+            "j_password": password
+        }
 
-            response = self.session.post(url=self.config[self.region]["login"], data=payload, params=querystring)
-        else:
-            login_params = {
-                "j_username": username,
-                "j_password": password
-            }
-
-            response = self.session.post(url=self.config[self.region]["login"], params=login_params)
+        response = self.session.post(url=self.config[self.region]["login"], params=login_params)
 
         status_response = self.session.get(url=self.config[self.region]["status"]).json()
         self.log.debug(status_response)
-        self.log.info(f"Success: {status_response['success']}")
-        if status_response["success"] != True:
-            raise self.log.exit("InvalidCredentials")
+        if status_response["success"] == False:
+            raise ValueError("InvalidCredentials")
         #if not status_response["userStatus"]["description"] == "SUBSCRIBER":
             #raise ValueError("NotEntitled")
         
@@ -429,17 +411,8 @@ class ParamountPlus(BaseService):
     
     def get_barrear(self, content_id):
         #license_data = self.session.get(url="https://www.intl.paramountplus.com/apps-api/v3.0/androidphone/irdeto-control/session-token.json?contentId=%s&locale=en-us&at=ABATOpD5wXyjhjIMO0BaNh/gW0iCu0ISRy2U7/tyGiKZTQTlYDFL1NPD58CcuJLOQYY=" % (content_id)).json()
-        try:
-            res = self.session.get(
-                url=self.config[self.region]["barrearUrl"].format(device=self.device["name"]), 
-                params={
-                    "contentId": content_id,
-                    **({
-                        "locale": "en-us",
-                        "at": self.config[self.region]["at_token"]
-                    } if self.region == "US" else {})
-                }
-            )
+        try:  
+            res = self.session.get(url=self.config[self.region]["barrearUrl"], params={"contentId": content_id})
             res.raise_for_status()
         except requests.HTTPError as e:
             if e.response.status_code == 401:
@@ -455,7 +428,7 @@ class ParamountPlus(BaseService):
         if not res["success"]:
             raise self.log.exit("Unable to get license token: %s" % (res["errors"]))
 
-        self.license_url = res["url"]
+        #license_url = license_data["url"]
         ls_session = res["ls_session"]
 
         return ls_session
@@ -492,3 +465,4 @@ class ParamountPlus(BaseService):
         session.headers.update(config.headers)
         session.cookies.update(self.cookies or {})
         return session
+

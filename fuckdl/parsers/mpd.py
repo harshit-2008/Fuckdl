@@ -78,11 +78,9 @@ def parse(*, url=None, data=None, source, session=None, downloader=None):
     if root.tag != "MPD":
         raise ValueError("Non-MPD document provided to Tracks.from_mpd")
 
-
     for period in root.findall("Period"):
         if source == "HULU" and next(iter(period.xpath("SegmentType/@value")), "content") != "content":
             continue
-
 
         period_base_url = period.findtext("BaseURL") or root.findtext("BaseURL")
         if url and not period_base_url or not re.match("^https?://", period_base_url.lower()):
@@ -176,7 +174,7 @@ def parse(*, url=None, data=None, source, session=None, downloader=None):
                 rep_base_url = rep.findtext("BaseURL")
                 if rep_base_url and (
                     (source in ["CR"] and content_type == "text")
-                    or (source not in ["DSNY", "CR"])
+                    or (source not in ["DSCP", "DSNY", "CR"])
                 ):
                     # this mpd allows us to download the entire file in one go, no segmentation necessary!
                     if not re.match("^https?://", rep_base_url.lower()):
@@ -301,7 +299,6 @@ def parse(*, url=None, data=None, source, session=None, downloader=None):
                         id_=track_id,
                         source=source,
                         url=track_url,
-                        rawurl=url,   
                         size=get_track_size(track_repr=rep),
                         # metadata
                         codec=(codecs or "").split(".")[0],
@@ -344,7 +341,6 @@ def parse(*, url=None, data=None, source, session=None, downloader=None):
                         id_=track_id,
                         source=source,
                         url=track_url,
-                        rawurl=url,     
                         # metadata
                         codec=(codecs or "").split(".")[0],
                         language=track_lang,
@@ -373,19 +369,57 @@ def parse(*, url=None, data=None, source, session=None, downloader=None):
                         extra=(rep, adaptation_set)
                     ))
                 elif content_type == "text" or content_type == "application":
-                    tracks.append(TextTrack(
-                        id_=track_id,
-                        source=source,
-                        url=track_url,
-                        rawurl=url,
-                        # metadata
-                        codec=(codecs or "").split(".")[0],
-                        language=track_lang,
-                        # switches/options
-                        descriptor=Track.Descriptor.MPD,
-                        # extra
-                        extra=(rep, adaptation_set)
-                    ))
+                    if source == 'HMAX':
+                        # HMAX SUBS
+                        segment_template = rep.find("SegmentTemplate")
+
+                        sub_path_url = rep.findtext("BaseURL")
+                        if not sub_path_url:
+                            sub_path_url = segment_template.get('media')
+                       
+                        try:
+                            path = re.search(r'(t\/.+?\/)t', sub_path_url).group(1)
+                        except AttributeError:
+                            path = 't/sub/'
+                        
+                        is_normal = any(x.get("value") == "subtitle" for x in adaptation_set.findall("Role"))
+                        is_sdh = any(x.get("value") == "caption" for x in adaptation_set.findall("Role"))
+                        is_forced = any(x.get("value") == "forced-subtitle" for x in adaptation_set.findall("Role"))
+
+                        if is_normal:
+                            track_url = [base_url + path + adaptation_set.get('lang') + '_sub.vtt']
+                        elif is_sdh:
+                            track_url = [base_url + path + adaptation_set.get('lang') + '_sdh.vtt']
+                        elif is_forced:
+                            track_url = [base_url + path + adaptation_set.get('lang') + '_forced.vtt']
+
+                        tracks.append(TextTrack(
+                            id_=track_id,
+                            source=source,
+                            url=track_url,
+                            # metadata
+                            codec=(codecs or "").split(".")[0],
+                            language=track_lang,
+                            forced=is_forced,
+                            sdh=is_sdh,
+                            # switches/options
+                            descriptor=Track.Descriptor.MPD,
+                            # extra
+                            extra=(rep, adaptation_set)
+                        ))
+                    else:
+                        tracks.append(TextTrack(
+                            id_=track_id,
+                            source=source,
+                            url=track_url,
+                            # metadata
+                            codec=(codecs or "").split(".")[0],
+                            language=track_lang,
+                            # switches/options
+                            descriptor=Track.Descriptor.MPD,
+                            # extra
+                            extra=(rep, adaptation_set)
+                        ))
 
     # r = session.get(url=url)
     # mpd = json.loads(json.dumps(xmltodict.parse(r.text)))
@@ -474,3 +508,4 @@ def parse(*, url=None, data=None, source, session=None, downloader=None):
     tracks_obj.add(tracks, warn_only=True)
 
     return tracks_obj
+

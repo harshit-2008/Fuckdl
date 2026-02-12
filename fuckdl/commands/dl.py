@@ -20,12 +20,9 @@ from langcodes import Language
 from pymediainfo import MediaInfo
 from Crypto.Random import get_random_bytes
 import math
-import re
-import binascii
-from collections import defaultdict # Import defaultdict
 from fuckdl import services
 from fuckdl.config import Config, config, credentials, directories, filenames
-from fuckdl.objects import AudioTrack, Credential, TextTrack, Title, Titles, VideoTrack, Track, tracks, Tracks
+from fuckdl.objects import AudioTrack, Credential, TextTrack, Title, Titles, VideoTrack, Track
 from fuckdl.objects.vaults import InsertResult, Vault, Vaults
 from fuckdl.utils import Cdm, is_close_match
 from fuckdl.utils.click import (AliasedGroup, ContextData, acodec_param, language_param, quality_param,
@@ -39,61 +36,78 @@ from pyplayready.system.pssh import PSSH as PSSH_PR
 from pyplayready.crypto.ecc_key import ECCKey
 from pyplayready.system.bcert import CertificateChain, Certificate
 from fuckdl.vendor.pymp4.parser import Box
+from pyplayready.crypto.ecc_key import ECCKey
+from pyplayready.system.bcert import CertificateChain, Certificate
+from Crypto.Random import get_random_bytes
+from pathlib import Path
+import time
 
-try:
-    from colorama import Fore, Style, init
-    init(autoreset=True)
-    COLORAMA_AVAILABLE = True
-except ImportError:
-    COLORAMA_AVAILABLE = False
-    Fore = Style = None
+def reprovision_device(prd_path: Path) -> None:
+    """
+    Reprovision a Playready Device (.prd) by creating a new leaf certificate and new encryption/signing keys.
+    Will override the device if an output path or directory is not specified
 
-DOWNLOADER_MAP = {"n_m3u8dl-re": "N_m3u8DL-RE", "aria2c": "Aria2c", "saldl": "saldl"}
+    Only works on PRD Devices of v3 or higher
+    """
+    if not prd_path.is_file():
+        raise Exception("prd_path: Not a path to a file, or it doesn't exist.")
 
-def ffprobe(file_path):
-    """Get media information using ffprobe"""
-    try:
-        import subprocess
-        import json
-        
-        result = subprocess.run([
-            'ffprobe',
-            '-v', 'quiet',
-            '-print_format', 'json',
-            '-show_streams',
-            '-show_format',
-            file_path
-        ], capture_output=True, text=True, check=True)
-        
-        return json.loads(result.stdout)
-    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as e:
-        logging.getLogger("dl").warning(f"ffprobe failed: {e}")
-        return None
+    device = Device_PR.load(prd_path)
 
-def create_device(device_dir) -> None:
+    if device.group_key is None:
+        raise Exception("Device does not support reprovisioning, re-create it or use a Device with a version of 3 or higher")
+
+    device.group_certificate.remove(0)
+
+    encryption_key = ECCKey.generate()
+    signing_key = ECCKey.generate()
+
+    device.encryption_key = encryption_key
+    device.signing_key = signing_key
+
+    new_certificate = Certificate.new_leaf_cert(
+        cert_id=get_random_bytes(16),
+        security_level=device.group_certificate.get_security_level(),
+        client_id=get_random_bytes(16),
+        signing_key=signing_key,
+        encryption_key=encryption_key,
+        group_key=device.group_key,
+        parent=device.group_certificate
+    )
+    device.group_certificate.prepend(new_certificate)
+
+    prd_path.parent.mkdir(parents=True, exist_ok=True)
+    prd_path.write_bytes(device.dumps())
+
+def create_device(device_dir, force_refresh=False) -> None:
     """Create a Playready Device (.prd) file from an ECC private group key and group certificate chain"""
     group_key = device_dir / 'zgpriv.dat'
     group_certificate = device_dir / 'bgroupcert.dat'
     infofile = device_dir / 'PR.json'
 
     if not group_key.is_file():
-        raise  TypeError("group_key: Not a path to a file, or it doesn't exist.")
+        raise TypeError("group_key: Not a path to a file, or it doesn't exist.")
     if not group_certificate.is_file():
         raise TypeError("group_certificate: Not a path to a file, or it doesn't exist.")
     
-    if infofile.is_file():
+    if force_refresh:
+        if infofile.is_file():
+            infofile.unlink()
+        device_files = list(device_dir.glob("*.prd"))
+        for device_file in device_files:
+            device_file.unlink()
+        logging.warning(" + Forcing device refresh...")
+    elif infofile.is_file():
         with open(infofile, 'r') as file:
             info = json.loads(file.read())
-        if "expiry" in info and datetime.fromisoformat(info["expiry"]) > datetime.now():
-            logging.info(" + Security Level: %s", info["SecurityLevel"])
-            logging.info(" + Device expiry: %s", info["expiry"])
-            return device_dir / info["device"]
-        else:
-            infofile.unlink()
+        if "device" in info:
             device_prd = Path(device_dir / info["device"])
             if device_prd.is_file():
-                device_prd.unlink()
-            logging.warning(" + Refreshing Device...")
+                logging.info(" + Loading existing device: %s", info["device"])
+                return device_prd
+        else:
+            infofile.unlink()
+            logging.warning(" + Invalid info file, refreshing device...")
 
     encryption_key = ECCKey.generate()
     signing_key = ECCKey.generate()
@@ -119,7 +133,7 @@ def create_device(device_dir) -> None:
         group_certificate=certificate_chain.dumps(),
     )
     
-    expiry = (datetime.now() + timedelta(hours=1)).isoformat()
+    expiry = (datetime.now() + timedelta(days=3650)).isoformat()
     prd_bin = device.dumps()
     out_path = device_dir / f"{device.get_name()}_{crc32(prd_bin).to_bytes(4, 'big').hex()}.prd"
 
@@ -132,13 +146,17 @@ def create_device(device_dir) -> None:
 
     logging.info(" + Created Playready Device (.prd) file, %s", out_path.name)
     logging.info(" + Security Level: %s", device.security_level)
-    logging.info(" + Device expiry: %s", expiry)
+    logging.info(" + Device expiry: %s (10 years from now)", expiry)
 
     with open(infofile, 'w') as file:
-        json.dump({"expiry": expiry, "device": out_path.name, "SecurityLevel": device.security_level}, file)
+        json.dump({
+            "expiry": expiry, 
+            "device": out_path.name, 
+            "SecurityLevel": device.security_level,
+            "created": datetime.now().isoformat()
+        }, file)
 
     return out_path
-
 
 def get_cdm(service, profile=None, cdm_name=None):
     """
@@ -148,25 +166,61 @@ def get_cdm(service, profile=None, cdm_name=None):
     if not cdm_name:
         cdm_name = config.cdm.get(service) or config.cdm.get("default")
     if not cdm_name:
-        raise ValueError("A CDM to use wasn't listed in the config file (fuckdl.yml)")
+        raise ValueError("A CDM to use wasn't listed in the vinetrimmer.yml config")
     if isinstance(cdm_name, dict):
         if not profile:
             raise ValueError("CDM config is mapped for profiles, but no profile was chosen")
         cdm_name = cdm_name.get(profile) or config.cdm.get("default")
         if not cdm_name:
             raise ValueError(f"A CDM to use was not mapped for the profile {profile}")
+    
     try:
         device_dir = Path(directories.devices) / cdm_name
-        # Check if it's a PlayReady device directory by looking for required files
+        
+        is_amazon_us = service.lower() in ["AMZN", "amazon"]
+        is_sl3000 = "sl3000" in cdm_name.lower() or "hisense" in cdm_name.lower()
+        
         if device_dir.is_dir() and (device_dir / 'zgpriv.dat').is_file() and (device_dir / 'bgroupcert.dat').is_file():
+            if is_amazon_us and is_sl3000:
+                # Look for existing .prd device
+                prd_files = list(device_dir.glob("*.prd"))
+                if prd_files:
+                    # Use the most recent
+                    latest_prd = max(prd_files, key=lambda x: x.stat().st_mtime)
+                    # Check if reprovisioning is needed (after ~2 days)
+                    if (int(time.time()) - int(os.path.getmtime(latest_prd))) > 172800:  # 2 days in seconds
+                        try:
+                            reprovision_device(latest_prd)
+                            logging.info(f" + Reprovisioned Playready Device (.prd) file, {latest_prd.name}")
+                        except Exception as e:
+                            logging.warning(f"Reprovision Failed - {e}")
+                    logging.info(f" + Using existing PlayReady device for Amazon US: {latest_prd.name}")
+                    return Device_PR.load(latest_prd)
+            
             device_path = create_device(device_dir)
             return Device_PR.load(device_path)
+        
         # Check if it's a direct path to a PlayReady device file
         if "sl2000" in cdm_name.lower() or "sl3000" in cdm_name.lower():
-            return Device_PR.load(os.path.join(directories.devices, f"{cdm_name}.prd"))
+            prd_path = os.path.join(directories.devices, f"{cdm_name}.prd")
+            if os.path.exists(prd_path):
+                # Check if reprovisioning is needed (after ~2 days)
+                if (int(time.time()) - int(os.path.getmtime(prd_path))) > 172800:  # 2 days in seconds
+                    try:
+                        reprovision_device(Path(prd_path))
+                        logging.info(f" + Reprovisioned Playready Device (.prd) file, {cdm_name}")
+                    except Exception as e:
+                        logging.warning(f"Reprovision Failed - {e}")
+                return Device_PR.load(prd_path)
+            else:
+                # If it doesn't exist, create a new one
+                if device_dir.is_dir():
+                    device_path = create_device(device_dir)
+                    return Device_PR.load(device_path)
         else:
             # Otherwise, treat as a Widevine device
             return LocalDevice.load(os.path.join(directories.devices, f"{cdm_name}.wvd"))
+    
     except FileNotFoundError:
         dirs = [
             os.path.join(directories.devices, cdm_name),
@@ -248,58 +302,12 @@ def get_credentials(service, profile="default"):
             return Credential.loads(cred)
 
 
-def get_ascii_art():
-    """Generate ASCII art banner with red FuckDL text."""
-    # Bigger ASCII art for FuckDL
-    fuckdl_text = """
-  ______          _      _____  _      
- |  ____|        | |    |  __ \| |     
- | |__ _   _  ___| | __ | |  | | |     
- |  __| | | |/ __| |/ / | |  | | |     
- | |  | |_| | (__|   <  | |__| | |____ 
- |_|   \__,_|\___|_|\_\ |_____/|______|
-                                       
-"""
-    
-    banner = """
-================================================================================
-                                                                              
-"""
-    
-    # Add red colored FuckDL text if colorama is available
-    if COLORAMA_AVAILABLE:
-        banner += Fore.RED + fuckdl_text + Style.RESET_ALL
-    else:
-        banner += fuckdl_text
-    
-    banner += """
-    Playready and Widevine DRM downloader and decrypter                       
-                                                                              
-    +------------------------------------------------------------------+      
-    |                    Created By Barbie DRM                        |      
-    |                  https://t.me/barbiedrm                          |      
-    +------------------------------------------------------------------+      
-                                                                              
-================================================================================
-"""
-    return banner
-
-
-class HelpGroup(AliasedGroup):
-    def format_help(self, ctx, formatter):
-        """Override format_help to add ASCII art at the top."""
-        # Print ASCII art first
-        click.echo(get_ascii_art())
-        # Then call the parent format_help
-        super().format_help(ctx, formatter)
-
-
-@click.group(name="dl", short_help="Download from a service.", cls=HelpGroup, context_settings=dict(
+@click.group(name="dl", short_help="Download from a service.", cls=AliasedGroup, context_settings=dict(
     help_option_names=["-?", "-h", "--help"],
     max_content_width=116,  # max PEP8 line-width, -4 to adjust for initial indent
     default_map=config.arguments
 ))
-@click.option("--debug", is_flag=True, hidden=True)  # Handled by fuckdl.py
+@click.option("--debug", is_flag=True, hidden=True)  # Handled by vinetrimmer.py
 @click.option("-p", "--profile", type=str, default=None,
               help="Profile to use when multiple profiles are defined for a service.")
 @click.option("-q", "--quality", callback=quality_param, default=None,
@@ -313,9 +321,7 @@ class HelpGroup(AliasedGroup):
               help="Video Bitrate, defaults to Max.")
 @click.option("-ab", "--abitrate", "abitrate", type=int,
               default=None,
-              help="Audio Bitrate, defaults to Max.")
-@click.option("--second", is_flag=True, default=False,
-              help="If download second video")           
+              help="Audio Bitrate, defaults to Max.")              
 @click.option("-aa", "--atmos", is_flag=True, default=False,
               help="Prefer Atmos Audio")
 @click.option("-ch", "--channels", help="Audio Channels")
@@ -333,8 +339,6 @@ class HelpGroup(AliasedGroup):
               help="Proxy URI to use. If a 2-letter country is provided, it will try get a proxy from the config.")
 @click.option("-A", "--audio-only", is_flag=True, default=False,
               help="Only download audio tracks.")
-@click.option("-V", "--video-only", is_flag=True, default=False,
-              help="Only download video tracks.")
 @click.option("-S", "--subs-only", is_flag=True, default=False,
               help="Only download subtitle tracks.")
 @click.option("-C", "--chapters-only", is_flag=True, default=False,
@@ -374,13 +378,6 @@ class HelpGroup(AliasedGroup):
               help="Choose the worst available video tracks rather than the best")
 @click.option("-nf", "--no-forced", is_flag=True, default=False,
               help="Do not download forced subtitle tracks.")
-@click.option("--no-sdh", is_flag=True, default=False,
-              help="Do not download SDH subtitle tracks.")
-@click.option("--no-cc", is_flag=True, default=False,
-              help="Do not download CC subtitle tracks.")
-@click.option("--no-ccextractor", is_flag=True, default=False,
-              help="Do not use ccextractor.")
-@click.option("-nt", "--no-title", is_flag=True, default=False, help="Remove Episode Name")
 @click.pass_context
 def dl(ctx, profile, cdm, *_, **__):
     log = logging.getLogger("dl")
@@ -405,26 +402,35 @@ def dl(ctx, profile, cdm, *_, **__):
     log.info(f" + {remote_vaults} Remote Vault{'' if remote_vaults == 1 else 's'}")
     log.info(f" + {http_vaults} HTTP Vault{'' if http_vaults == 1 else 's'}")
 
-    downloader_config = getattr(config, 'downloader', None)
-    if not downloader_config:
-        # Default to n_m3u8dl-re if not specified
-        downloader = "n_m3u8dl-re"
-        log.warning("Downloader not specified in config file (fuckdl.yml), using default: n_m3u8dl-re")
-    elif isinstance(downloader_config, dict):
-        downloader = downloader_config.get(service) or downloader_config.get("default")
-        if not downloader:
-            downloader = "n_m3u8dl-re"
-            log.warning("Downloader not found for service, using default: n_m3u8dl-re")
-    else:
-        downloader = downloader_config
-    log.info(f" + Downloader: {DOWNLOADER_MAP.get(str(downloader).lower())}")      
     try:
         device = get_cdm(service, profile, cdm)
     except ValueError as e:
         raise log.exit(f" - {e}")
-    device_name = device.get_name() if "sl3000" in device.get_name() or "sl2000" in device.get_name() else device.system_id
+    
+    # Add this check after device is loaded
+    if hasattr(device, 'type') and device.type == LocalDevice.Types.PLAYREADY:
+        # For PlayReady devices, check if reprovisioning is needed on every run
+        if hasattr(device, '_path') and device._path:  # Check if device has a file path
+            prd_path = Path(device._path)
+            if prd_path.exists():
+                if (int(time.time()) - int(os.path.getmtime(prd_path))) > 172800:  # 2 days
+                    try:
+                        reprovision_device(prd_path)
+                        log.info(f" + Reprovisioned Playready Device (.prd) file")
+                        # Reload the device after reprovisioning
+                        device = Device_PR.load(prd_path)
+                    except Exception as e:
+                        log.warning(f"Reprovision Failed - {e}")
+    
+    device_name = ""
+    if isinstance(device, Device_PR):
+        device_name = device.get_name()
+    elif isinstance(device, (LocalDevice, RemoteDevice)):
+        device_name = str(device.system_id)
+    else:
+        device_name = "Unknown Device"
     log.info(f" + Loaded {device.__class__.__name__}: {device_name} (L{device.security_level})")
-    cdm = Cdm_PR.from_device(device) if "sl3000" in device.get_name()  or "sl2000" in device.get_name() else Cdm(device)
+    cdm = Cdm_PR.from_device(device) if isinstance(device, Device_PR) else Cdm(device)
 
     if profile:
         cookies = get_cookie_jar(service, profile)
@@ -437,7 +443,6 @@ def dl(ctx, profile, cdm, *_, **__):
 
     ctx.obj = ContextData(
         config=service_config,
-        downloader=downloader,         
         vaults=vaults,
         cdm=cdm,
         profile=profile,
@@ -448,29 +453,28 @@ def dl(ctx, profile, cdm, *_, **__):
 
 @dl.result_callback()
 @click.pass_context
-def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, video_only, subs_only, chapters_only, audio_description,
-           list_, keys, cache, no_cache, no_subs, no_audio, no_video, no_chapters, atmos, vbitrate: int, abitrate: int, channels, no_mux, worst, mux, delay, selected, no_title, second, no_forced, no_sdh, no_cc, no_ccextractor, *_, **__):
+def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, subs_only, chapters_only, audio_description,
+           list_, keys, cache, no_cache, no_subs, no_audio, no_video, no_chapters, atmos, vbitrate: int, abitrate: int, channels, no_mux, worst, mux, delay, selected, no_forced, *_, **__):
     def ccextractor():
-        if not no_ccextractor:
-            log.info("Extracting EIA-608 captions from stream with CCExtractor")
-            track_id = f"ccextractor-{track.id}"
-            # TODO: Is it possible to determine the language of EIA-608 captions?
-            cc_lang = track.language
-            try:
-                cc = track.ccextractor(
-                    track_id=track_id,
-                    out_path=filenames.subtitles.format(id=track_id, language_code=cc_lang),
-                    language=cc_lang,
-                    original=False,
-                )
-            except EnvironmentError:
-                log.warning(" - CCExtractor not found, cannot extract captions")
+        log.info("Extracting EIA-608 captions from stream with CCExtractor")
+        track_id = f"ccextractor-{track.id}"
+        # TODO: Is it possible to determine the language of EIA-608 captions?
+        cc_lang = track.language
+        try:
+            cc = track.ccextractor(
+                track_id=track_id,
+                out_path=filenames.subtitles.format(id=track_id, language_code=cc_lang),
+                language=cc_lang,
+                original=False,
+            )
+        except EnvironmentError:
+            log.warning(" - CCExtractor not found, cannot extract captions")
+        else:
+            if cc:
+                title.tracks.add(cc)
+                log.info(" + Extracted")
             else:
-                if cc:
-                    title.tracks.add(cc)
-                    log.info(" + Extracted")
-                else:
-                    log.info(" + No captions found")
+                log.info(" + No captions found")
 
     log = service.log
 
@@ -490,9 +494,6 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
     first = True    
 
     for title in titles.with_wanted(wanted):
-        if service_name.lower()=="crunchyroll" or service_name.lower()=="cr":
-            log.info(f"Closing all sessions...")
-            service.close_all_sessions()
         if not first and delay:
             d = delay + random.randint(math.floor(int(-delay/5.0)), math.floor((delay/5.0))) 
             log.info(f"Delaying for {d}s before getting next title...")
@@ -501,18 +502,18 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
         first = False
 
         if title.type == Title.Types.TV:
-            log.info("Getting tracks for {title} S{season:02}E{episode:02}{name} [{id}]".format(
-                title=title.name,
-                season=title.season or 0,
-                episode=title.episode or 0,
-                name=f" - {title.episode_name}" if title.episode_name else "",
-                id=title.id,
+            log.info("Getting tracks for {} S{:02}E{:02}{} [{}]".format(
+                title.name,
+                title.season,
+                title.episode,
+                f" - {title.episode_name}" if title.episode_name else "",
+                title.id
             ))
         else:
-            log.info("Getting tracks for {title}{year} [{id}]".format(
-                title=title.name,
-                year=f" ({title.year})" if title.year else "",
-                id=title.id,
+            log.info("Getting tracks for {}{} [{}]".format(
+                title.name,
+                f" ({title.year})" if title.year else "",
+                title.id
             ))
 
         try:
@@ -528,8 +529,6 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
         title.tracks.sort_audios(by_language=alang)
         title.tracks.sort_subtitles(by_language=slang)
         title.tracks.sort_chapters()
-        if second == True:
-            del title.tracks.videos[0]
 
         for track in title.tracks:
             if track.language == Language.get("none"):
@@ -544,11 +543,13 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
             title.tracks.print()
 
         try:
-            #title.tracks.select_videos(by_quality=quality, by_range=range_, one_only=True)
-            title.tracks.select_videos(by_quality=quality, by_vbitrate=vbitrate, by_range=range_, one_only=True, by_worst=worst)
+            if range_ == "DV+HDR":
+                title.tracks.select_videos_multi(["HDR10", "DV"], by_quality=quality, by_vbitrate=vbitrate)
+            else:
+                title.tracks.select_videos(by_quality=quality, by_vbitrate=vbitrate, by_range=range_, one_only=True, by_worst=worst)
             title.tracks.select_audios(by_language=alang, by_bitrate=abitrate, with_atmos=atmos, with_descriptive=audio_description, by_channels=channels)
            # title.tracks.select_audios(by_language=alang, with_descriptive=audio_description)
-            title.tracks.select_subtitles(by_language=slang, with_cc=False if no_cc else True, with_sdh=False if no_sdh else True, with_forced=False if no_forced else True)
+            title.tracks.select_subtitles(by_language=slang, with_forced=False if no_forced else True)
         except ValueError as e:
             log.error(f" - {e}")
             continue
@@ -563,12 +564,7 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
             title.tracks.subtitles.clear()
             
         if no_chapters:
-            title.tracks.chapters.clear()
-            
-        if video_only:
-            title.tracks.audios.clear()
-            title.tracks.subtitles.clear()
-            title.tracks.chapters.clear()       
+            title.tracks.chapters.clear()    
         
         if audio_only or subs_only or chapters_only:
             title.tracks.videos.clear()
@@ -670,10 +666,7 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
                             if isinstance(license_res, bytes):
                                 if "<License>" in license_res.decode():
                                     license_res = base64.b64encode(license_res).decode()
-                            try:
-                                license_res=base64.b64decode(license_res).decode()
-                            except:
-                                pass
+                            license_res=base64.b64decode(license_res).decode()
                             ctx.obj.cdm.parse_license(session_id, license_res)
                             content_keys = [
                                 (x.key_id.hex, x.key.hex()) for x in ctx.obj.cdm.get_keys(session_id)
@@ -688,7 +681,7 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
                                                                                   
                             session_id = ctx.obj.cdm.open(track.pr_pssh,raw=True)
                         else:
-                            session_id = ctx.obj.cdm.open(track.pssh)
+                            session_id = ctx.obj.cdm.open(track.pssh, service_name=service_name.lower())
                         try:
                             ctx.obj.cdm.set_service_certificate(
                                 session_id,
@@ -769,26 +762,14 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
             continue
 
         # download and decrypt
-        # Modified order: subtitles first, then audio, then video
-        all_tracks = list(title.tracks)
-        
-        # Separate tracks by type
-        subtitle_tracks = [t for t in all_tracks if isinstance(t, TextTrack)]
-        audio_tracks = [t for t in all_tracks if isinstance(t, AudioTrack)]
-        video_tracks = [t for t in all_tracks if isinstance(t, VideoTrack)]
-        other_tracks = [t for t in all_tracks if not isinstance(t, (TextTrack, AudioTrack, VideoTrack))]
-        
-        # Process in order: subtitles -> audio -> video -> others
-        ordered_tracks = subtitle_tracks + audio_tracks + video_tracks + other_tracks
-        
-        for track in ordered_tracks:
+        for track in title.tracks:
             if not keys:
                 log.info(f"Downloading: {track}")
                 if track.needs_proxy:
                     proxy = next(iter(service.session.proxies.values()), None)
                 else:
                     proxy = None
-                track.download(downloader=ctx.obj.downloader, track=track, out=directories.temp, headers=service.session.headers, proxy=proxy)
+                track.download(directories.temp, headers=service.session.headers, proxy=proxy)
                 log.info(" + Downloaded")
             if isinstance(track, VideoTrack) and track.needs_ccextractor_first and not no_subs:
                 ccextractor()
@@ -871,53 +852,25 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
                 ccextractor()
 
                     
-        
-        # DV metadata injection phase (if hybrid mode)
-        hybrid = range_ and range_.upper() in ("DVHDR", "HDRDV", "HYBRID")
-        hybrid_location = None
-        if hybrid and title.tracks.videos:
-            log.info("Post-processing Dolby Vision metadata")
-            
-            # Extract FPS from video tracks before injection
-            for video in title.tracks.videos:
-                if not hasattr(video, 'fps') or not video.fps:
-                    # Try to get FPS from the video file using ffprobe
-                    probe = ffprobe(video.locate())
-                    if probe:
-                        try:
-                            fps_str = probe.get("streams", [{}])[0].get("avg_frame_rate")
-                            if fps_str and '/' in fps_str:
-                                num, den = fps_str.split('/')
-                                if den != '0':  # Check for division by zero
-                                    video.fps = float(num) / float(den)
-                                    log.info(f" + Detected FPS: {video.fps:.3f}")
-                                else:
-                                    log.warning(f" - Could not extract FPS: denominator is zero")
-                        except (IndexError, ValueError, ZeroDivisionError) as e:
-                            log.warning(f" - Could not extract FPS: {e}")
-                
-                # Mark video track for duration fix during muxing
-                video.needs_duration_fix = True
-            
-            from fuckdl.objects.tracks import DV_INJECTION
-            # Inject DV metadata into HDR10 stream
-            # videos[0] = HDR10 track, videos[-1] = DV track (lowest quality)
-            dv_name = str(title.tracks.videos[-1].locate())
-            hdr_out = dv_name.replace('.mp4', '.hevc')
-            DV_INJECTION(title.tracks.videos[0].locate(), title.tracks.videos[-1].locate(), log)
-            hybrid_location = hdr_out
-            # Update DV track location to None so cleanup doesn't try to delete it
-            title.tracks.videos[-1]._location = None
-            log.info(" + DV metadata injection completed")
-            
+        if range_ == "DV+HDR":
+            try:
+                # Check if we already have a DV+HDR track
+                dvhdr_tracks = [t for t in title.tracks.videos if t.dv and t.hdr10]
+                if dvhdr_tracks:
+                    log.info(" + Track is already DV+HDR, no processing needed")
+                else:
+                    hybrid_path = title.tracks.make_hybrid()
+                    log.info(f" + Hybrid DV+HDR created: {hybrid_path}")
+            except Exception as e:
+                log.warning(f" - Skipped Hybrid DV+HDR: {e}")
+
         if not list(title.tracks) and not title.tracks.chapters:
             continue
-        # mux all final tracks to a single mkv file
-        if no_mux or video_only:
+        if no_mux:
             if title.tracks.chapters:
                 final_file_path = directories.downloads
                 if title.type == Title.Types.TV:
-                    final_file_path = os.path.join(final_file_path, title.parse_filename(folder=True, no_title=no_title))
+                    final_file_path = os.path.join(final_file_path, title.parse_filename(folder=True))
                 os.makedirs(final_file_path, exist_ok=True)
                 chapters_loc = filenames.chapters.format(filename=title.filename)
                 title.tracks.export_chapters(chapters_loc)
@@ -927,10 +880,10 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
                 final_file_path = directories.downloads
                 if title.type == Title.Types.TV:
                     final_file_path = os.path.join(
-                        final_file_path, title.parse_filename(folder=True, no_title=no_title)
+                        final_file_path, title.parse_filename(folder=True)
                     )
                 os.makedirs(final_file_path, exist_ok=True)
-                filename = title.parse_filename(media_info=media_info, no_title=no_title)
+                filename = title.parse_filename(media_info=media_info)
                 if isinstance(track, (AudioTrack, TextTrack)):
                     filename += f".{track.language}"
                 extension = track.codec if isinstance(track, TextTrack) else os.path.splitext(track.locate())[1][1:]
@@ -939,7 +892,7 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
                 track.move(os.path.join(final_file_path, f"{filename}.{track.id}.{extension}"))
         else:
             log.info("Muxing tracks into an MKV container")
-            muxed_location, returncode = title.tracks.mux(title.filename, hybrid=hybrid, hybrid_location=hybrid_location)
+            muxed_location, returncode = title.tracks.mux(title.filename)
             if returncode == 1:
                 log.warning(" - mkvmerge had at least one warning, will continue anyway...")
             elif returncode >= 2:
@@ -956,7 +909,7 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
             final_file_path = directories.downloads
             if title.type == Title.Types.TV:
                 final_file_path = os.path.join(
-                    final_file_path, title.parse_filename(media_info=media_info, folder=True, no_title=no_title)
+                    final_file_path, title.parse_filename(media_info=media_info, folder=True)
                 )
             os.makedirs(final_file_path, exist_ok=True)
             # rename muxed mkv file with new data from mediainfo data of it
@@ -968,7 +921,7 @@ def result(ctx, service, quality, range_, wanted, alang, slang, audio_only, vide
                 extension = "mkv"
             shutil.move(
                 muxed_location,
-                os.path.join(final_file_path, f"{title.parse_filename(media_info=media_info, no_title=no_title)}.{extension}")
+                os.path.join(final_file_path, f"{title.parse_filename(media_info=media_info)}.{extension}")
             )
             
 

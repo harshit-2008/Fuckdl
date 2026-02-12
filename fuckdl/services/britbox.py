@@ -228,8 +228,7 @@ class BritBox(BaseService):
                     url=connection["href"],
                     source=self.ALIASES[0],
                     #codec=Subtitle.Codec.from_codecs("ttml"),
-                    #codec=caption["type"].split("/")[-1].replace("ttaf+xml", "ttml"),
-                    codec="srt",
+                    codec=caption["type"].split("/")[-1].replace("ttaf+xml", "ttml"),
                     language=caption["language"],#title.language,
                     #is_original_lang=True if str(title.language) in caption["language"] else False,
                     forced=False,
@@ -466,3 +465,4 @@ class BritBox(BaseService):
                 return m.group(group)
         else:
             return next(iter(re.findall(pattern, string)), None)
+

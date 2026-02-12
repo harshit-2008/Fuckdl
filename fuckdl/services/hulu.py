@@ -4,8 +4,9 @@ import click
 import requests
 from langcodes import Language
 
-from fuckdl.objects import TextTrack, MenuTrack, Title, Tracks
+from fuckdl.objects import TextTrack, Title, Tracks
 from fuckdl.services.BaseService import BaseService
+from fuckdl.utils.pyhulu import Device, HuluClient
 from fuckdl.utils.widevine.device import LocalDevice
 
 class Hulu(BaseService):
@@ -31,18 +32,14 @@ class Hulu(BaseService):
     @click.command(name="Hulu", short_help="https://hulu.com")
     @click.argument("title", type=str, required=False)
     @click.option("-m", "--movie", is_flag=True, default=False, help="Title is a movie.")
-    @click.option("-mt", "--mpd-type", type=click.Choice(["new", "old"], case_sensitive=False),
-                  default="new",
-                  help="which mpd type to use")
     @click.pass_context
     def cli(ctx, **kwargs):
         return Hulu(ctx, **kwargs)
 
-    def __init__(self, ctx, title, movie, mpd_type):
+    def __init__(self, ctx, title, movie):
         super().__init__(ctx)
         m = self.parse_title(ctx, title)
         self.movie = movie or m.get("type") == "movie"
-        self.mpd_type = mpd_type
         self.cdm = ctx.obj.cdm
         self.vcodec = ctx.parent.params["vcodec"]
         self.acodec = ctx.parent.params["acodec"]
@@ -111,87 +108,32 @@ class Hulu(BaseService):
                         service_data=episode
                     ))
 
+        playlist = self.hulu_client.load_playlist(titles[0].service_data["bundle"]["eab_id"])
+        for title in titles:
+            title.original_lang = Language.get(playlist["video_metadata"]["language"])
+
         return titles
+
     def remove_parts_mpd(self, mpd):
-        # Remove specific representations by ID
-        pattern = r'<Representation[^>]*id="(?:H264_1_CMAF_CENC_CTR_8500K|H264_1_CMAF_CENC_CTR_5500K|H264_1_CMAF_CENC_CTR_6000K)"[^>]*>.*?</Representation>\s*'
+        pattern = r'<Representation[^>]*id="(?![^"]*ALT_1)[^"]*CENC_CTR_[^"]*"[^>]*width="1920"[^>]*height="1080"[^>]*>.*?</Representation>\s*'
         m = re.sub(pattern, "", mpd, flags=re.DOTALL)
         return m
 
     def get_tracks(self, title):
         try:
-            playlist = self.session.post(
-                url=self.config["endpoints"]["manifest"],
-                json={
-                    "deejay_device_id": 210 if self.mpd_type == "new" else 166,
-                    "version": 1 if self.mpd_type == "new" else 9999999,
-                    "all_cdn": False,
-                    "content_eab_id": title.service_data["bundle"]["eab_id"],
-                    "region": "US",
-                    "language": "en",
-                    "unencrypted": True,
-                    "network_mode": "wifi",
-                    "play_intent": "resume",
-                    "playback": {
-                        "version": 2,
-                        "video": {
-                            "dynamic_range": "DOLBY_VISION",
-                            "codecs": {
-                                "values": [x for x in self.config["codecs"]["video"] if x["type"] == self.vcodec],
-                                "selection_mode": self.config["codecs"]["video_selection"]
-                            }
-                        },
-                        "audio": {
-                            "codecs": {
-                                "values": self.config["codecs"]["audio"],
-                                "selection_mode": self.config["codecs"]["audio_selection"]
-                            }
-                        },
-                        "drm": {
-                            "multi_key": True,
-                            "values": self.config["drm"]["schemas_pr"] if self.cdm.device.type == LocalDevice.Types.PLAYREADY else self.config["drm"]["schemas_wv"],
-                            "selection_mode": self.config["drm"]["selection_mode"],
-                            "hdcp": self.config["drm"]["hdcp"]
-                        },
-                        "manifest": {
-                            "type": "DASH",
-                            "https": True,
-                            "multiple_cdns": False,
-                            "patch_updates": True,
-                            "hulu_types": True,
-                            "live_dai": True,
-                            "secondary_audio": True,
-                            "live_fragment_delay": 3
-                        },
-                        "segments": {
-                            "values": [{
-                                "type": "FMP4",
-                                "encryption": {
-                                    "mode": "CENC",
-                                    "type": "CENC"
-                                },
-                                "https": True
-                            }],
-                            "selection_mode": "ONE"
-                        }
-                    }
-                }
-            ).json()
-
+            playlist = self.hulu_client.load_playlist(title.service_data["bundle"]["eab_id"])
         except requests.HTTPError as e:
             res = e.response.json()
             raise self.log.exit(f" - {res['message']} ({res['code']})")
-        
-        title.original_lang = Language.get(playlist["video_metadata"]["language"])
-        manifest = playlist["stream_url"]
 
-        self.playlist = playlist
         self.license_url_widevine = playlist.get("wv_server")
         self.license_url_playready = playlist.get('dash_pr_server')
 
+        manifest = playlist["stream_url"]
+
         self.log.info(f"DASH: {manifest}")
 
-        if 'dynamic-manifest' in manifest:
+        if 'disney' in manifest:
             mpd = self.session.get(manifest).text
             mpd_data = self.remove_parts_mpd(mpd)
 
@@ -207,33 +149,30 @@ class Hulu(BaseService):
                 session=self.session,
                 source=self.ALIASES[0]
             )
-        try:
-            if self.cdm.device.type == LocalDevice.Types.PLAYREADY:
-                video_pssh = next(x.pr_pssh for x in tracks.videos if x.pr_pssh)
+        if self.cdm.device.type == LocalDevice.Types.PLAYREADY:
+            video_pssh = next(x.pr_pssh for x in tracks.videos if x.pr_pssh)
 
-                for track in tracks.videos:
-                    if track.hdr10:
-                        # MPD only says HDR10+, but Hulu HDR streams are always Dolby Vision Profile 8 with HDR10+ compatibility
-                        track.hdr10 = False
-                        track.dv = True
+            for track in tracks.videos:
+                if track.hdr10:
+                    # MPD only says HDR10+, but Hulu HDR streams are always Dolby Vision Profile 8 with HDR10+ compatibility
+                    track.hdr10 = False
+                    track.dv = True
 
-                for track in tracks.audios:
-                    if not track.pr_pssh:
-                        track.pr_pssh = video_pssh
-            else:
-                video_pssh = next(x.pssh for x in tracks.videos if x.pssh)
+            for track in tracks.audios:
+                if not track.pr_pssh:
+                    track.pr_pssh = video_pssh
+        else:
+            video_pssh = next(x.pssh for x in tracks.videos if x.pssh)
 
-                for track in tracks.videos:
-                    if track.hdr10:
-                        # MPD only says HDR10+, but Hulu HDR streams are always Dolby Vision Profile 8 with HDR10+ compatibility
-                        track.hdr10 = False
-                        track.dv = True
+            for track in tracks.videos:
+                if track.hdr10:
+                    # MPD only says HDR10+, but Hulu HDR streams are always Dolby Vision Profile 8 with HDR10+ compatibility
+                    track.hdr10 = False
+                    track.dv = True
 
-                for track in tracks.audios:
-                    if not track.pssh:
-                        track.pssh = video_pssh
-        except:
-            pass
+            for track in tracks.audios:
+                if not track.pssh:
+                    track.pssh = video_pssh
 
         if self.acodec:
             tracks.audios = [x for x in tracks.audios if (x.codec or "")[:4] == self.AUDIO_CODEC_MAP[self.acodec]]
@@ -256,24 +195,7 @@ class Hulu(BaseService):
         return tracks
 
     def get_chapters(self, title):
-        try:
-            segments = self.playlist["video_metadata"]["segments"]
-            end_credits_time = self.playlist["video_metadata"].get("end_credits_time", None)
-            if segments is None and end_credits_time is None:
-                return []
-            chapters = [segment.replace("T:", "") for segment in segments.split(",")]
-            if end_credits_time:
-                end_credits_time = end_credits_time.replace(";",".0")
-                end_credits_time = end_credits_time[:-3] + end_credits_time[-3:].zfill(3)
-                if end_credits_time != '00:00:00.000':
-                    chapters.append(end_credits_time)
-            chapters = [x.replace(";",".0") for x in chapters]
-            chapters = [x[:-3] + x[-3:].zfill(3) for x in chapters]
-            chapters.insert(0, '00:00:00.000')
-            return [MenuTrack(index + 1, "Chapter {:02d}".format(index + 1), chapter) for index, chapter in enumerate(chapters)]
-
-        except:
-            return None
+        return []
 
     def certificate(self, **_):
         return None  # will use common privacy cert
@@ -298,6 +220,68 @@ class Hulu(BaseService):
     # Service specific functions
 
     def configure(self):
+        self.device = Device(
+            device_code=self.config["device"]["FireTV4K"]["code"],
+            device_key=self.config["device"]["FireTV4K"]["key"]
+        )
         self.session.headers.update({
             "User-Agent": self.config["user_agent"],
         })
+        self.playback_params = {
+            "all_cdn": False,
+            "region": "US",
+            "language": "en",
+            "interface_version": "1.9.0",
+            "network_mode": "wifi",
+            "play_intent": "resume",
+            "playback": {
+                "version": 2,
+                "video": {
+                    "dynamic_range": "DOLBY_VISION",
+                    "codecs": {
+                        "values": [x for x in self.config["codecs"]["video"] if x["type"] == self.vcodec],
+                        "selection_mode": self.config["codecs"]["video_selection"]
+                    }
+                },
+                "audio": {
+                    "codecs": {
+                        "values": self.config["codecs"]["audio"],
+                        "selection_mode": self.config["codecs"]["audio_selection"]
+                    }
+                },
+                "drm": {
+                    "multi_key": True,
+                    "values": self.config["drm"]["schemas_pr"] if self.cdm.device.type == LocalDevice.Types.PLAYREADY else self.config["drm"]["schemas_wv"],
+                    "selection_mode": self.config["drm"]["selection_mode"],
+                    "hdcp": self.config["drm"]["hdcp"]
+                },
+                "manifest": {
+                    "type": "DASH",
+                    "https": True,
+                    "multiple_cdns": False,
+                    "patch_updates": True,
+                    "hulu_types": True,
+                    "live_dai": True,
+                    "secondary_audio": True,
+                    "live_fragment_delay": 3
+                },
+                "segments": {
+                    "values": [{
+                        "type": "FMP4",
+                        "encryption": {
+                            "mode": "CENC",
+                            "type": "CENC"
+                        },
+                        "https": True
+                    }],
+                    "selection_mode": "ONE"
+                }
+            }
+        }
+        self.hulu_client = HuluClient(
+            device=self.device,
+            session=self.session,
+            version=self.config["device"].get("device_version"),
+            **self.playback_params
+        )
+

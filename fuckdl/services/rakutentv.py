@@ -8,15 +8,16 @@ import hmac
 import re
 import urllib.parse
 import click
-import requests
-
-from copy import copy
-from langcodes import Language
-from pymediainfo import MediaInfo
 from requests.exceptions import HTTPError
+
 from fuckdl.config import config, directories
 from fuckdl.objects import TextTrack, Title, Tracks
 from fuckdl.services.BaseService import BaseService
+from copy import copy
+from langcodes import *
+from pymediainfo import MediaInfo
+
+import requests
 from requests.adapters import HTTPAdapter, Retry
 from fuckdl.utils.widevine.device import LocalDevice
 
@@ -26,16 +27,7 @@ class RakutenTV(BaseService):
 
     \b
     Authorization: Credentials
-    Security: FHD-UHD@L1, SD-FHD@L3
-
-    \b
-    Maximum of 3 audio tracks, otherwise will fail because Rakuten blocks more than 3 requests.
-    Subtitles requests expires fast, so together with video and audio it will fail.
-    If you want subs, use -S or -na -nv -nc, and download the rest separately.
-
-    \b
-    Command for Titles with no SDR (if not set range to HDR10 it will fail):
-    poetry vt dl -r HDR10 [OPTIONS] RKTN -m https://www.rakuten.tv/...
+    Security: FHD-UHD@L1, SD-FHD@L3; with trick
 
     \b
     TODO: - TV Shows are not yet supported as there's 0 TV Shows to purchase, rent, or watch in my region
@@ -50,38 +42,49 @@ class RakutenTV(BaseService):
     @staticmethod
     @click.command(name="RakutenTV", short_help="rakuten.tv")
     @click.argument("title", type=str, required=False)
-    @click.option("-dev", "--device", default=None,
-                type=click.Choice(
-                [
-                    "web",  # Device: Web Browser - Maximum Quality: 720p - DRM: Widevine
-                    "android",  # Device: Android Phone - Maximum Quality: 720p - DRM: Widevine
-                    "atvui40",  # Device: AndroidTV - Maximum Quality: 2160p - DRM: Widevine
-                    "lgui40",  # Device: LG SMART TV - Maximum Quality: 2160p - DRM: Playready
-                    "smui40",  # Device: Samsung SMART TV - Maximum Quality: 2160p - DRM: Playready
-                ], case_sensitive=True),
-            help="The device you want to make requests with.")
-    @click.option("-m", "--movie", is_flag=True, default=False, help="Title is a movie.")
+    @click.option(
+        "-dev",
+        "--device",
+        default=None,
+        type=click.Choice(
+            [
+                "web",  # Device: Web Browser - Maximum Quality: 720p - DRM: Widevine
+                "android",  # Device: Android Phone - Maximum Quality: 720p - DRM: Widevine
+                "atvui40",  # Device: AndroidTV - Maximum Quality: 2160p - DRM: Widevine
+                "lgui40",  # Device: LG SMART TV - Maximum Quality: 2160p - DRM: Playready
+                "smui40",  # Device: Samsung SMART TV - Maximum Quality: 2160p - DRM: Playready
+            ],
+            case_sensitive=True,
+        ),
+        help="The device you want to make requests with.",
+    )
+    @click.option(
+        "-m", "--movie", is_flag=True, default=False, help="Title is a movie."
+    )
     @click.pass_context
     def cli(ctx, **kwargs):
         return RakutenTV(ctx, **kwargs)
+        
+
 
     def __init__(self, ctx, title, device, movie):
-        super().__init__(ctx)
-        assert ctx.parent is not None
-        self.ctx = ctx
-        self.parse_title(ctx, title)
+
         self.playready = ctx.obj.cdm.device.type == LocalDevice.Types.PLAYREADY
-        self.device = device or ("lgui40" if self.playready else "android")
         self.vcodec = ctx.parent.params["vcodec"] or "H264"
         self.resolution = "UHD" if self.vcodec.lower() == "h265" else "FHD"
-        self.range = ctx.parent.params["range_"] or "SDR"
-        self.movie = movie or "movies" in title
+        self.device = device
+        super().__init__(ctx)
 
-        self.configure()
+        self.device = "lgui40" if self.playready else "android"
+        self.parse_title(ctx, title)
+        self.movie = movie or "movies" in title
+        self.range = ctx.parent.params["range_"]
+
+        self.configure()        
+
 
     def get_titles(self):
         self.pair_device()
-
         title_url = self.config["endpoints"]["title"].format(
             title_id=self.title
         ) + urllib.parse.urlencode(
@@ -98,6 +101,7 @@ class RakutenTV(BaseService):
             }
         )
 
+        
         title = self.session.get(url=title_url).json()
         if "errors" in title:
             error = title["errors"][0]
@@ -107,8 +111,8 @@ class RakutenTV(BaseService):
                 self.log.exit(
                     f"Unable to get title info: {error['message']} [{error['code']}]"
                 )
-
         title = self.get_info(title["data"])
+
         if self.movie:
             titles = Title(
                 id_=self.title,
@@ -126,88 +130,70 @@ class RakutenTV(BaseService):
         return titles
 
     def get_tracks(self, title):
-        all_tracks = None
-        
-        for audio_lang in self.audio_languages:
-            self.log.info(f"Getting tracks for audio language: {audio_lang}")
-
-            stream_info = self.get_avod(audio_lang) if self.kind == "avod" else self.get_me(audio_lang)
-            if "errors" in stream_info:
-                error = stream_info["errors"][0]
-                if "error.streaming.no_active_right" in stream_info["errors"][0]["code"]:
-                    self.log.exit(
-                        " x You don't have the rights for this content\n   You need to rent or buy it first"
-                    )
-                else:
-                    self.log.exit(
-                        f" - Failed to get track info: {error['message']} [{error['code']}]"
-                    )
-            
-            stream_info = stream_info["data"]["stream_infos"][0]
-            if all_tracks is None:
-                self.license_url = stream_info["license_url"]
-                all_tracks = Tracks.from_mpd(
-                    url=stream_info["url"],
-                    session=self.session,
-                    source=self.ALIASES[0],
+        stream_info = self.get_avod() if self.kind == "avod" else self.get_me()
+        if "errors" in stream_info:
+            error = stream_info["errors"][0]
+            if "error.streaming.no_active_right" in stream_info["errors"][0]["code"]:
+                self.log.exit(
+                    " x You don't have the rights for this content\n   You need to rent or buy it first"
                 )
-
-                subtitle_tracks = []
-                for subtitle in stream_info.get("all_subtitles", []):
-                    if subtitle["format"] == "srt":
-                        subtitle_tracks += [
-                            TextTrack(
-                                id_=hashlib.md5(subtitle["url"].encode()).hexdigest()[0:6],
-                                source=self.ALIASES[0],
-                                url=subtitle["url"],
-                                codec="srt",
-                                forced=subtitle["forced"],
-                                language=subtitle["locale"],
-                            )
-                        ]
-                all_tracks.add(subtitle_tracks)
-                
-                if not all_tracks.subtitles:
-                    subtitle_tracks = []
-                    for subtitle in stream_info.get("all_subtitles"):
-                        if subtitle["format"] == "vtt":
-                            subtitle_tracks += [
-                                TextTrack(
-                                    id_=hashlib.md5(subtitle["url"].encode()).hexdigest()[0:6],
-                                    source=self.ALIASES[0],
-                                    url=subtitle["url"],
-                                    # metadata
-                                    codec="vtt",
-                                    forced=subtitle["forced"],
-                                    language=subtitle["locale"],
-                                )
-                            ]            
-                    all_tracks.add(subtitle_tracks)
-
             else:
-                temp_tracks = Tracks.from_mpd(
-                    url=stream_info["url"],
-                    session=self.session,
-                    source=self.ALIASES[0],
+                self.log.exit(
+                    f" - Failed to get track info: {error['message']} [{error['code']}]"
                 )
+        stream_info = stream_info["data"]["stream_infos"][0]
 
-                for audio_track in temp_tracks.audios:
-                    is_duplicate = False
-                    for existing_audio in all_tracks.audios:
-                        if (existing_audio.language == audio_track.language and 
-                            existing_audio.codec == audio_track.codec):
-                            is_duplicate = True
-                            break
-                    if not is_duplicate:
-                        all_tracks.audios.append(audio_track)
+        self.license_url = stream_info["license_url"]
 
-        for video in all_tracks.videos:
+        tracks = Tracks.from_mpd(
+            url=stream_info["url"],
+            session=self.session,
+            #lang=title.original_lang,
+            source=self.ALIASES[0],
+        )
+
+        subtitle_tracks = []
+        for subtitle in stream_info.get("all_subtitles"):
+            if subtitle["format"] == "srt":
+                subtitle_tracks += [
+                    TextTrack(
+                        id_=hashlib.md5(subtitle["url"].encode()).hexdigest()[0:6],
+                        source=self.ALIASES[0],
+                        url=subtitle["url"],
+                        # metadata
+                        codec="srt",
+                        forced=subtitle["forced"],
+                        language=subtitle["locale"],
+                    )
+                ]
+
+        tracks.add(subtitle_tracks)
+
+        if not tracks.subtitles:
+            subtitle_tracks = []
+            for subtitle in stream_info.get("all_subtitles"):
+                if subtitle["format"] == "['vtt']":
+                    subtitle_tracks += [
+                        TextTrack(
+                            id_=hashlib.md5(subtitle["url"].encode()).hexdigest()[0:6],
+                            source=self.ALIASES[0],
+                            url=subtitle["url"].replace("['vtt']", "vtt"),
+                            # metadata
+                            codec="vtt",
+                            forced=subtitle["forced"],
+                            language=subtitle["locale"],
+                        )
+                    ]
+
+            tracks.add(subtitle_tracks)
+
+        #self.append_tracks(tracks)
+
+        for video in tracks.videos:
             if "HDR10" in video.url:
                 video.hdr10 = True
 
-        #self.append_tracks(all_tracks)
-
-        return all_tracks
+        return tracks
 
     def get_chapters(self, title):
         return []
@@ -348,29 +334,21 @@ class RakutenTV(BaseService):
     def get_info(self, title):
         self.kind = title["labels"]["purchase_types"][0]["kind"]
 
-        #self.available_resolutions = [x for x in title["labels"]["video_qualities"]]
-        #if any(x["abbr"] == "UHD" for x in title["labels"]["video_qualities"]):
-        #        self.resolution = "UHD"
-        #elif any(x["abbr"] == "FHD" for x in title["labels"]["video_qualities"]):
-        #        self.resolution = "FHD"
-        #elif any(x["abbr"] == "HD" for x in title["labels"]["video_qualities"]):
-        #        self.resolution = "FHD"
-        #else:
-        #        self.resolution = "SD"
-
         self.available_hdr_types = [x for x in title["labels"]["hdr_types"]]
         if any(x["abbr"] == "HDR10_PLUS" for x in self.available_hdr_types) and any(
-            x["abbr"] == "HDR10_PLUS" for x in title["view_options"]["support"]["hdr_types"]
+            x["abbr"] == "HDR10_PLUS"
+            for x in title["view_options"]["support"]["hdr_types"]
         ):
             self.hdr_type = "HDR10_PLUS"
+        elif any(x["abbr"] == "DOLBY_VISION" for x in self.available_hdr_types) and any(
+            x["abbr"] == "DOLBY_VISION"
+            for x in title["view_options"]["support"]["hdr_types"]
+        ):
+            self.hdr_type = "DOLBY_VISION"
         elif any(x["abbr"] == "HDR10" for x in self.available_hdr_types) and any(
             x["abbr"] == "HDR10" for x in title["view_options"]["support"]["hdr_types"]
         ):
             self.hdr_type = "HDR10"
-        elif any(x["abbr"] == "DOLBY_VISION" for x in self.available_hdr_types) and any(
-            x["abbr"] == "DOLBY_VISION" for x in title["view_options"]["support"]["hdr_types"]
-        ):
-            self.hdr_type = "DOLBY_VISION"
         else:
             self.hdr_type = "NONE"
 
@@ -382,26 +360,17 @@ class RakutenTV(BaseService):
                 ]
             ]
         else:
-            all_audio_languages = []
-            for stream in title["view_options"]["private"]["streams"]:
-                for audio_lang in stream["audio_languages"]:
-                    if audio_lang["abbr"] not in all_audio_languages:
-                        all_audio_languages.append(audio_lang["abbr"])
-            self.audio_languages = all_audio_languages
-
-        print(f"\nAvailable audio languages: {', '.join(self.audio_languages)}")
-        selected = input("Type your desired languages, maximum of 3, UPPER CASE (ex: ENG,SPA,FRA): ")
-        selected_langs = [lang.strip() for lang in selected.split(",") if lang.strip() in self.audio_languages]
-        if not selected_langs:
-            self.log.exit("No selected language. Exiting.")
-        self.audio_languages = selected_langs
-        self.log.info(f"Selected audio languages: {self.audio_languages}")
+            self.audio_languages = [
+                x["abbr"]
+                for x in [
+                    x["audio_languages"][0]
+                    for x in title["view_options"]["private"]["streams"]
+                ]
+            ]
 
         return title
 
-    def get_avod(self, audio_language=None):
-        if audio_language is None:
-            audio_language = self.audio_languages[0]
+    def get_avod(self):
         stream_info_url = self.config["endpoints"]["manifest"].format(
             kind="avod"
         ) + urllib.parse.urlencode(
@@ -420,11 +389,13 @@ class RakutenTV(BaseService):
             url=stream_info_url,
             data={
                 "hdr_type": self.hdr_type,
-                "audio_quality": "5.1",
+                "audio_quality": "5.1",  # Will get better audio in different request to make sure it wont error
                 "app_version": self.config["clients"][self.device]["app_version"],
                 "content_id": self.title,
                 "video_quality": self.resolution,
-                "audio_language": audio_language,
+                "audio_language": self.audio_languages[
+                    0
+                ],  # Make sure we always request a language that's available
                 "video_type": "stream",
                 "device_serial": self.config["clients"][self.device]["device_serial"],
                 "content_type": "movies" if self.movie else "episodes",
@@ -434,15 +405,15 @@ class RakutenTV(BaseService):
             },
         ).json()
 
-    def get_me(self, audio_language=None):
-        if audio_language is None:
-            audio_language = self.audio_languages[0]
+    def get_me(self):
         stream_info_url = self.config["endpoints"]["manifest"].format(
             kind="me"
         ) + urllib.parse.urlencode(
             {
-                "audio_language": audio_language,
-                "audio_quality": "5.1",
+                "audio_language": self.audio_languages[
+                    0
+                ],  # Make sure we always request a language that's available
+                "audio_quality": "5.1",  # Will get better audio in different request to make sure it wont error
                 "classification_id": self.classification_id,
                 "content_id": self.title,
                 "content_type": "movies" if self.movie else "episodes",
@@ -481,7 +452,6 @@ class RakutenTV(BaseService):
 
     def append_tracks(self, tracks):
         codec = tracks.videos[0].codec[:4]
-        
         if "avc1" in codec:
             for n in range(100):
                 ismv = re.sub(
@@ -500,14 +470,11 @@ class RakutenTV(BaseService):
                     )
                     chunkfile.write(data.content)
                 info = MediaInfo.parse(f"{directories.temp}/video_bytes.mp4")
-                if info.video_tracks:
-                    video.height = info.video_tracks[0].height
-                    video.width = info.video_tracks[0].width
-                    video.bitrate = info.video_tracks[0].maximum_bit_rate
-                    if not video.bitrate:
-                        video.bitrate = info.video_tracks[0].bit_rate
-                else:
-                    continue
+                video.height = info.video_tracks[0].height
+                video.width = info.video_tracks[0].width
+                video.bitrate = info.video_tracks[0].maximum_bit_rate
+                if not video.bitrate:
+                    video.bitrate = info.video_tracks[0].bit_rate
                 os.remove(f"{directories.temp}/video_bytes.mp4")
                 tracks.videos.append(video)
 
@@ -519,14 +486,11 @@ class RakutenTV(BaseService):
                         rf"audio-{language.lower()}-{codec}-1",
                         tracks.audios[0].url,
                     )
-                    if self.session.head(isma).status_code != 200:
-                        continue
-                    track_exists = False
-                    for existing_audio in tracks.audios:
-                        if existing_audio.url == isma:
-                            track_exists = True
-                            break
-                    if track_exists:
+                    if (
+                        self.session.head(isma).status_code != 200
+                        or language == self.audio_languages[0]
+                        and codec == "mp4a"
+                    ):
                         continue
                     audio = copy(tracks.audios[0])
                     audio.codec = codec
@@ -539,24 +503,17 @@ class RakutenTV(BaseService):
                         and tracks.videos[0].is_original_lang
                         else False
                     )
-                    
-                    try:
-                        with open(f"{directories.temp}/audio_bytes.mp4", "wb+") as bytetest:
-                            data = self.session.get(
-                                url=isma, headers={"Range": "bytes=0-50000"}
-                            )
-                            bytetest.write(data.content)
-                        info = MediaInfo.parse(f"{directories.temp}/audio_bytes.mp4")
-                        audio.bitrate = info.audio_tracks[0].bit_rate
-                        if codec != "mp4a":  # TODO: Don't assume
-                            audio.channels = "6"
-                        os.remove(f"{directories.temp}/audio_bytes.mp4")
-                        tracks.audios.append(audio)
-                        self.log.info(f"Added audio track: {language} - {codec}")
-                    except Exception as e:
-                        self.log.warning(f"Failed to process audio track {language}-{codec}: {str(e)}")
-                        if os.path.exists(f"{directories.temp}/audio_bytes.mp4"):
-                            os.remove(f"{directories.temp}/audio_bytes.mp4")
+                    with open(f"{directories.temp}/audio_bytes.mp4", "wb+") as bytetest:
+                        data = self.session.get(
+                            url=isma, headers={"Range": "bytes=0-50000"}
+                        )
+                        bytetest.write(data.content)
+                    info = MediaInfo.parse(f"{directories.temp}/audio_bytes.mp4")
+                    audio.bitrate = info.audio_tracks[0].bit_rate
+                    if codec != "mp4a":  # TODO: Don't assume
+                        audio.channels = "6"
+                    os.remove(f"{directories.temp}/audio_bytes.mp4")
+                    tracks.audios.append(audio)
 
     def get_session(self):
         session = requests.Session()

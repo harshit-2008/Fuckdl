@@ -1,0 +1,71 @@
+decrypter: 'packager'
+tag: ''
+tag_sd: ''
+
+arguments: {}
+
+aria2c:
+  file_allocation: 'prealloc'
+  
+
+cdm:
+  default: 'xiaomi_mi_a1_15.0.0_60ceee88_8159_l3'
+  DisneyPlus: ''
+  Netflix: ''
+  Amazon: ''
+  Max: ''
+  AppleTVPlus: ''
+  Hulu: ''
+
+cdm_api:
+  - name: ''
+    host: ''
+    key: ''
+    device: ''
+    type: ''
+    system_id: 
+    security_level:
+
+credentials:
+  HuluJP: 'email:password'
+  CTV: 'email:password'
+  Netflix: 'email:password'
+  DisneyPlus: 'email:password'
+  All4: 'email:password'
+  Stan: 'email:password'
+  Peacock: 'email:password'
+
+directories:
+  temp: ''
+  downloads: ''
+
+headers:
+  User-Agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
+
+#'Crunchyroll/ANDROIDTV/3.45.0_22272'
+#'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
+
+key_vaults:
+  - type: 'local'
+    name: 'Local'
+    path: '{data_dir}/key_store.db'
+
+output_template:
+  movies: '{title}.{year}.{quality}.{source}.WEB-DL.{audio}.{video}-{tag}'
+  series: '{title}.{season_episode}.{episode_name}.{quality}.{source}.WEB-DL.{audio}.{video}-{tag}'
+  use_last_audio: false
+
+profiles:
+  default: 'default'
+
+default_proxy_service: 'nordvpn' # Options: 'surfshark', 'nordvpn' 'null'
+
+proxies: {}
+
+nordvpn:
+    username: ''
+    password: ''
+
+surfshark:
+    username: ''
+    password: ''

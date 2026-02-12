@@ -1,0 +1,9 @@
+needs_auth: false
+endpoints:
+  manifest_enc: 'https://vod.provider.plex.tv{key}?includeAllStreams=1&X-Plex-Product=Plex+Mediaverse&X-Plex-Token={token}&X-Plex-DRM={drm}'
+  manifest_dec: 'https://vod.provider.plex.tv{key}?includeAllStreams=1&X-Plex-Product=Plex+Mediaverse&X-Plex-Token={token}'
+  metadata: 'https://luma.plex.tv/api/action/get-actions-for-metadata-item?slug='
+  license: 'https://vod.provider.plex.tv{license}?X-Plex-Token={token}&X-Plex-DRM={drm}'
+  auth: 'https://plex.tv/api/v2/users/anonymous'
+  play: 'https://vod.provider.plex.tv/playQueues'
+  screen: 'https://luma.plex.tv/api/screen'

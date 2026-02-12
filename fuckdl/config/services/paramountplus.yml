@@ -1,23 +1,24 @@
+needs_auth: false
 US:
   device_link: True
   rows: 50 # Int number between 1 and 50
   base_url: 'https://www.paramountplus.com'
-  at_token: 'ABB+XYTJa4Y14QBS5+7jCYvFe04w88I5dxzStu4zlQ4rqTTW/iMZ33tuiqPzzdgMJjQ='
-  login: 'https://www.paramountplus.com/apps-api/v2.1/androidphone/auth/login.json'
+  at_token: 'ABAAAAAAAAAAAAAAAAAAAAAAWfnPErrqirt03ZH6JjxMtNqssgFKfspS+x2N9H4ea0g='
+  login: 'https://www.paramountplus.com/apps-api/v2.0/androidphone/auth/login.json'
   status: 'https://www.paramountplus.com/apps-api/v2.0/androidphone/app/status.json'
   movie: 'https://www.paramountplus.com/apps-api/v3.0/androidphone/movies/{title_id}.json'
   shows: 'https://www.paramountplus.com/apps-api/v3.0/androidphone/shows/slug/{title}.json'
   section: 'https://www.paramountplus.com/apps-api/v2.0/androidphone/shows/{showId}/videos/config/{config}.json'
   seasons: 'https://www.paramountplus.com/apps-api/v2.0/androidphone/videos/section/{section}.json'
   show: 'https://www.paramountplus.com/apps-api/v3.0/androidphone/shows/{}.json'
-  #video_items: 'https://www.paramountplus.com/apps-api/v2.0/{device}/video/cid/{content_id}.json'
-  barrearUrl: 'https://www.paramountplus.com/apps-api/v3.1/{device}/irdeto-control/session-token.json'
+  video_items: 'https://www.paramountplus.com/apps-api/v2.0/{device}/video/cid/{content_id}.json?at=ABAAAAAAAAAAAAAAAAAAAAAAWfnPErrqirt03ZH6JjxMtNqssgFKfspS+x2N9H4ea0g='
+  barrearUrl: 'https://www.paramountplus.com/apps-api/v3.1/xboxone/irdeto-control/anonymous-session-token.json'
 
 FR:
   device_link: True
   rows: 50 # Int number between 1 and 50
   base_url: 'https://www.paramountplus.com'
-  at_token: 'ABB+XYTJa4Y14QBS5+7jCYvFe04w88I5dxzStu4zlQ4rqTTW/iMZ33tuiqPzzdgMJjQ='
+  at_token: 'ABAS/G30Pp6tJuNOlZ1OEE6Rf5goS0KjICkGkBVIapVuxemiiASyWVfW4v7SUeAkogc='
   login: 'https://www.paramountplus.com/apps-api/v2.0/androidphone/auth/login.json'
   status: 'https://www.paramountplus.com/apps-api/v3.0/androidphone/login/status.json'
   movie: 'https://www.paramountplus.com/apps-api/v3.0/androidphone/movies/{title_id}.json'
@@ -25,14 +26,14 @@ FR:
   section: 'https://www.paramountplus.com/apps-api/v2.0/androidphone/shows/{showId}/videos/config/{config}.json'
   seasons: 'https://www.paramountplus.com/apps-api/v2.0/androidphone/videos/section/{section}.json'
   show: 'https://www.paramountplus.com/apps-api/v3.0/androidphone/shows/{}.json'
-  #video_items: 'https://www.paramountplus.com/apps-api/v2.0/{device}/video/cid/{content_id}.json'
-  barrearUrl: 'https://www.paramountplus.com/apps-api/v3.1/{device}/irdeto-control/session-token.json'
+  video_items: 'https://www.paramountplus.com/apps-api/v2.0/{device}/video/cid/{content_id}.json'
+  barrearUrl: 'https://www.paramountplus.com/apps-api/v3.1/xboxone/irdeto-control/anonymous-session-token.json'
 
 INTL:
   device_link: False
   rows: 50 # Int number between 1 and 50
   base_url: 'https://www.intl.paramountplus.com'
-  at_token: 'ABAS/G30Pp6tJuNOlZ1OEE6Rf5goS0KjICkGkBVIapVuxemiiASyWVfW4v7SUeAkogc='
+  at_token: 'ABAAAAAAAAAAAAAAAAAAAAAAztiXJGevjukkQ/cIYM0QAdFzif4NvhEbo2pS/UaLAOs='
   login: 'https://www.intl.paramountplus.com/apps-api/v2.0/androidphone/auth/login.json'
   status: 'https://www.intl.paramountplus.com/apps-api/v3.0/androidphone/login/status.json'
   movie: 'https://www.intl.paramountplus.com/apps-api/v3.0/androidphone/movies/{title_id}.json'
@@ -40,34 +41,11 @@ INTL:
   section: 'https://www.intl.paramountplus.com/apps-api/v2.0/androidphone/shows/{showId}/videos/config/{config}.json'
   seasons: 'https://www.intl.paramountplus.com/apps-api/v2.0/androidphone/videos/section/{section}.json'
   show: 'https://www.intl.paramountplus.com/apps-api/v3.0/androidphone/shows/{}.json'
-  #video_items: 'https://www.intl.paramountplus.com/apps-api/v2.0/{device}/video/cid/{content_id}.json'
-  barrearUrl: 'https://www.intl.paramountplus.com/apps-api/v3.1/{device}/irdeto-control/session-token.json'
+  video_items: 'https://www.intl.paramountplus.com/apps-api/v2.0/{device}/video/cid/{content_id}.json?at=ABAAAAAAAAAAAAAAAAAAAAAAztiXJGevjukkQ/cIYM0QAdFzif4NvhEbo2pS/UaLAOs='
+  barrearUrl: 'https://www.intl.paramountplus.com/apps-api/v3.1/xboxone/irdeto-control/session-token.json'
 
-devices:
-  android-phone:
-    name: androidphone
-    id: 2627c5dc1455ea61
-    user_agent:
-      Paramount+/12.0.79 (com.cbs.app; build:211207904; Android SDK 31; androidphone; Pixel 3 XL) okhttp/4.10.0
-    app_secret:
-      US: 2c160dbae70b337f
-      INTL: f9d0f66c6c144bae
-  android-tv:
-    name: androidtv
-    id: 18918781bb3040a9
-    user_agent:
-      Paramount+/12.0.79 (com.cbs.ott; build:211207905; Android SDK 30; androidtv; SHIELD Android TV) okhttp/4.10.0
-    app_secret:
-      US: 26a3f745e174790a
-      INTL: f9d0f66c6c144bae
-  xbox-one:
-    name: 'xboxone'
-    id: 18918781bb3040a9
-    user_agent:
-      Paramount+/12.0.79 (com.cbs.ott; build:211207905; Windows NT 10.0; Xbox; Xbox One) okhttp/4.10.0
-    app_secret:
-      US: 26a3f745e174790a
-      INTL: f9d0f66c6c144bae
+Android:
+  UserAgent: 'Mozilla/5.0 (Linux; Android 13; SM-A536E) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36'
 
 LINK_PLATFORM_URL: 'http://link.theplatform.com/s/dJ5BDC/media/guid/2198311517/{video_id}'
 license_wv: 'https://cbsi.live.ott.irdeto.com/widevine/getlicense'

@@ -61,7 +61,7 @@ class BBCiPlayer(BaseService):
         return BBCiPlayer(ctx, **kwargs)
 
     def __init__(self, ctx, title: str, movie):
-        self.title = title
+        self.parse_title(ctx, title)
         self.movie = movie
         super().__init__(ctx)
         self.vcodec = ctx.parent.params.get("vcodec")
@@ -85,7 +85,7 @@ class BBCiPlayer(BaseService):
 
         data = self.get_data(pid, slice_id=None)
         if data is None and type == "episode":
-            return self.fetch_episode(pid)
+            return Series([self.fetch_episode(pid)])
 
         elif data is None:
             raise ValueError(f"Metadata was not found - if {pid} is an episode, use full URL as input")
@@ -375,4 +375,5 @@ class BBCiPlayer(BaseService):
         self.session.headers.update({
             "User-Agent": self.config["user_agent"],
         })
+
 

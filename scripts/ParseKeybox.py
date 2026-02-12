@@ -2,7 +2,7 @@
 
 import argparse
 
-from fuckdl.utils.widevine.keybox import Keybox
+from vinetrimmer.utils.widevine.keybox import Keybox
 
 parser = argparse.ArgumentParser(
     "Keybox parser",

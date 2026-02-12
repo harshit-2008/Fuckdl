@@ -48,3 +48,4 @@ class drm(Service):
             raise Exception(f"Failed to obtain license: {res}")
         except json.JSONDecodeError:
             return res.content
+

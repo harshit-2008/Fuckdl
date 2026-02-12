@@ -57,3 +57,4 @@ class EntityAuthentication(MSLObject):
                 "keyrequest": keyrequest
             }
         )
+

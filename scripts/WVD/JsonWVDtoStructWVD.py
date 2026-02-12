@@ -5,10 +5,10 @@ import base64
 import json
 import os
 
-from fuckdl.utils.widevine.device import LocalDevice
+from vinetrimmer.utils.widevine.device import LocalDevice
 
 """
-Code to convert common folder/file structure to a fuckdl WVD.
+Code to convert common folder/file structure to a vinetrimmer WVD.
 """
 
 parser = argparse.ArgumentParser(

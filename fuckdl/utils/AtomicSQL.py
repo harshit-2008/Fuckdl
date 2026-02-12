@@ -83,3 +83,4 @@ class AtomicSQL:
             lambda db, cursor: db.commit()
         )
         return True  # todo ; actually check if db.commit worked
+

@@ -23,3 +23,4 @@ def urlsafe_decode(s):
     if isinstance(s, str):
         s = s.encode()
     return base64.urlsafe_b64decode(s + b"==")
+

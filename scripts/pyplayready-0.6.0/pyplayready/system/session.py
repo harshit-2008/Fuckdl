@@ -1,4 +1,3 @@
-import random
 from typing import Optional
 
 from Crypto.Random import get_random_bytes

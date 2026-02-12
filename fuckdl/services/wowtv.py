@@ -1,49 +1,35 @@
-from __future__ import annotations
-
 import base64
+import json
 import hashlib
 import hmac
-import json
-import sys
 import time
-from collections.abc import Generator
-from http.cookiejar import CookieJar
-from typing import Any, Optional, Union
-from urllib.parse import urlparse
-from fuckdl.utils.widevine.device import LocalDevice
+import sys
+
 import click
-import requests
+from bs4 import BeautifulSoup
+from langcodes import Language
+
 from fuckdl.objects import Title, Tracks
 from fuckdl.services.BaseService import BaseService
+from fuckdl.utils.regex import find
 from langcodes import Language
+from fuckdl.utils.widevine.device import LocalDevice
 
 class WowTV(BaseService):
     """
-    \b
-    Service code for WowTV's streaming service (https://wowtv.de)
-    Only UK is currently supported
+    Service code for WowTV Germany (https://www.wowtv.de/).
 
     \b
     Authorization: Cookies
-    Robustness:
-      Widevine:
-        L1: 1080p, DDP5.1
-        L3: 720p, AAC2.0
+    Security: UHD@-- FHD@SL2000
 
+    Requires an DE IP
     """
 
     ALIASES = ["WOW"]
-    #GEOFENCE = ["de"]
-
-    TITLE_RE = [
-        r"https?://(?:www\.)?wowtv\.[a-z]+/watch/asset(?:/movies|/tv)?(?P<id>/[._a-z0-9-]+/[A-Za-z0-9_]+)",
-        r"https?://(?:www\.)?wowtv\.[a-z]+/watch/asset/(?P<id>/[._a-z0-9-]+/[A-Za-z0-9_]+)",
-    ]
-
-
 
     @staticmethod
-    @click.command(name="WowTV", short_help="https://wowtv.de", help=__doc__)
+    @click.command(name="WowTV", short_help="https://wowtv.de")
     @click.argument("title", type=str)
     @click.option("-m", "--movie", is_flag=True, default=False, help="Title is a movie.")
     @click.pass_context
@@ -51,223 +37,293 @@ class WowTV(BaseService):
         return WowTV(ctx, **kwargs)
 
     def __init__(self, ctx, title, movie):
-        # self.title = title
-        self.parse_title(ctx, title)
+        self.title = title
         self.movie = movie
         super().__init__(ctx)
         self.cdm = ctx.obj.cdm
         self.license_api = None
         self.skyCEsidismesso01 = None
+        self.persona_id = None
         self.userToken = None
-        self.vcodec = ctx.parent.params["vcodec"]
-        self.vrange= ctx.parent.params["range_"]
 
         self.configure()
 
-    def configure(self):       
+    def configure(self):
         self.skyCEsidismesso01 = self.session.cookies.get('skyCEsidismesso01')
-        self.userToken = self.get_token()
+        self.persona_id = self.persona()
+        self.userToken = self.get_user_token()
 
     def get_titles(self):
-        #if not self.title.startswith("/"):
-        #   self.title = "/" + self.title
-
-
-        res = self.session.get(
-            url="https://eu.api.atom.wowtv.de/adapter-calypso/v3/query/node?slug="+self.title,
-            params="represent=(items(items)%2Crecs%5Btake%3D8%5D%2Ccollections(items(items%5Btake%3D8%5D))%2Ctrailers)&features=upcoming&contentSegments=ENTERTAINMENT%2CHAYU%2CKIDS%2CMOVIES%2CNEWS%2CSHORTFORM%2CSPORTS%2CSPORTS_CORE%2CSPORTS_ESSENTIALS%2CSPORTS_EVENTS%2CSPORTS_EVENTS_EXCLUSIVE%2CSPORTS_EXTRA%2CSPORTS_EXTRA_EXCLUSIVE%2CSSN",
-            headers={
-                "Accept": "*",
-                "X-SkyOTT-Device": "COMPUTER",
-                "X-SkyOTT-Platform": "PC",
-                "X-SkyOTT-Proposition": "NOWOTT",
-                "X-SkyOTT-Provider": "NOWTV",
-                "X-SkyOTT-Territory": self.config["client"]["territory"],
-            },
-        ).json()
-
-        if self.movie:           
+        headers = {
+            "origin": "https://www.wowtv.de",
+            "referer": "https://www.wowtv.de/",
+            "X-Skyott-Device": "COMPUTER",
+            "X-Skyott-Language": "de",
+            "X-Skyott-Platform": "PC",
+            "X-Skyott-Proposition": "NOWTV",
+            "X-Skyott-Provider": "NOWTV",
+            "X-Skyott-Territory": "DE"
+        }
+        if self.movie:
+            res = self.session.get(
+                url=self.config['endpoints']['movie_info'].format(title_id=self.title),
+                headers=headers
+            ).json()
+            movie = res['data']['showpage']['hero']
             return Title(
                 id_=self.title,
                 type_=Title.Types.MOVIE,
-                name=res["attributes"]["title"],
-                year=res["attributes"]["year"],
-                original_lang="eng",  # TODO: Don't assume
+                name=movie['title'],
+                year=movie['year'],
+                original_lang="deu",  # TODO: Don't assume
                 source=self.ALIASES[0],
-                service_data=res
+                service_data=movie
             )
-            
         else:
-            titles = [
-                episode
-                for season in res["relationships"]["items"]["data"]
-                for episode in season["relationships"]["items"]["data"]
-            ]           
+            res = self.session.get(
+                url=self.config['endpoints']['series_info'].format(title_id=self.title),
+                headers=headers
+            ).json()
+            episodes = []
+            for season in res['data']['showpage']['hero']['seasons']:
+                episodes = episodes + season['episodes']
             return [Title(
                 id_=self.title,
                 type_=Title.Types.TV,
-                name=res["attributes"]["title"],
-                season=episode["attributes"].get("seasonNumber", 0),
-                episode=episode["attributes"].get("episodeNumber", 0),
-                episode_name=episode["attributes"].get("title"),
-                original_lang="eng",  # TODO: Don't assume
+                name=e['titleMedium'],
+                season=e['seasonNumber'],
+                episode=e['episodeNumber'],
+                episode_name=e['title'],
+                original_lang="deu",  # TODO: Don't assume
                 source=self.ALIASES[0],
-                service_data=episode
-            ) for episode in titles]
-
+                service_data=e
+            ) for e in episodes]
 
     def get_tracks(self, title):
-        supported_colour_spaces=["SDR"]
+        now_id = None
+        if "HD" in title.service_data['formats']:
+            now_id = title.service_data['formats']["HD"]['contentId']
+        else:
+            now_id = title.service_data['formats']["SD"]['contentId']
 
-        if self.vrange == "HDR10":
-            self.log.info("Switched dynamic range to  HDR10")
-            supported_colour_spaces=["HDR10"]
-        if self.vrange == "DV":
-            self.log.info("Switched dynamic range to  DV")
-            supported_colour_spaces=["DV"]
-    
-        variant_id = title.service_data["attributes"]["providerVariantId"]
-        url = self.config["endpoints"]["vod"]
+        '''service = Service(executable_path=r'./chromedriver')
+        options = webdriver.ChromeOptions()
+        options.add_argument('--headless=new')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--no-sandbox')
+        options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+        options.add_experimental_option('excludeSwitches', ['disable-component-update'])
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.get("https://www.nowtv.it/404")
+        for cookie in self.cookies:
+            cookie_dict = {'domain': cookie.domain, 'name': cookie.name, 'value': cookie.value, 'secure': cookie.secure}
+            if cookie.expires:
+                cookie_dict['expiry'] = cookie.expires
+            if cookie.path_specified:
+                cookie_dict['path'] = cookie.path
+            driver.add_cookie(cookie_dict)
+        driver.get("https://www.wowtv.de/watch/playback/vod/"+contentId)
+
+        res = None
+        tries = 0
+
+        def process_browser_log_entry(entry):
+                response = json.loads(entry['message'])['message']
+                return response
+
+        while res == None and tries < 10:
+            time.sleep(10)
+            tries += 1
+            browser_log = driver.get_log('performance') 
+            events = [process_browser_log_entry(entry) for entry in browser_log]
+            events = [event for event in events if 'Network.response' in event['method']]
+            
+            for e in events:
+                if 'params' in e and 'response' in e['params']:
+                    if '/video/playouts/vod' in e['params']['response']['url'] and e['params']['type'] != 'Preflight':
+                        res = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': e["params"]["requestId"]})
+
+        driver.close()'''
+
+        '''if not res:
+            self.log.exit(f" - Selenium couldn't find /video/playouts/vod request")
+            raise
+
+        manifest = json.loads(res['body'])
+
+        if "errorCode" in manifest:
+            self.log.exit(f" - An error occurred: {manifest['description']} [{manifest['errorCode']}]")
+            raise
+
+        self.license_api = manifest["protection"]["licenceAcquisitionUrl"]
+        #self.license_bt = manifest["protection"]["licenceToken"]'''
 
         headers = {
-            "accept": "application/vnd.playvod.v1+json",
-            "content-type": "application/vnd.playvod.v1+json",
-            "x-skyott-activeterritory": self.config["client"]["territory"],
-            "x-skyott-device": self.config["client"]["device"],
-            "x-skyott-platform": self.config["client"]["platform"],
-            "x-skyott-proposition": self.config["client"]["proposition"],
-            "x-skyott-provider": self.config["client"]["provider"],
-            "x-skyott-territory": self.config["client"]["territory"],
-            "x-skyott-usertoken": self.get_token(),
+            'accept': 'application/vnd.playvod.v1+json',
+            'content-type': 'application/vnd.playvod.v1+json',
+            'x-skyott-device': 'TV',
+            'x-skyott-platform': 'ANDROIDTV',
+            'x-skyott-proposition': 'NOWTV',
+            'x-skyott-provider': 'NOWTV',
+            'x-skyott-territory': 'DE',
+            'x-skyott-usertoken': self.userToken,
         }
 
-        data = {
-            "device": {
-                "capabilities": [
-                    # H265 EAC3
-                    {
-                        "transport": "DASH",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "vcodec": "H265",
-                        "acodec": "EAC3",
-                        "container": "TS",
-                    },
-                    {
-                        "transport": "DASH",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "vcodec": "H265",
-                        "acodec": "EAC3",
-                        "container": "ISOBMFF",
-                    },
-                    {
-                        "container": "MP4",
-                        "vcodec": "H265",
-                        "acodec": "EAC3",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "transport": "DASH",
-                    },
-                    # H264 EAC3
-                    {
-                        "transport": "DASH",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "vcodec": "H264",
-                        "acodec": "EAC3",
-                        "container": "TS",
-                    },
-                    {
-                        "transport": "DASH",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "vcodec": "H264",
-                        "acodec": "EAC3",
-                        "container": "ISOBMFF",
-                    },
-                    {
-                        "container": "MP4",
-                        "vcodec": "H264",
-                        "acodec": "EAC3",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "transport": "DASH",
-                    },
-                    # H265 AAC
-                    {
-                        "transport": "DASH",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "vcodec": "H265",
-                        "acodec": "AAC",
-                        "container": "TS",
-                    },
-                    {
-                        "transport": "DASH",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "vcodec": "H265",
-                        "acodec": "AAC",
-                        "container": "ISOBMFF",
-                    },
-                    {
-                        "container": "MP4",
-                        "vcodec": "H265",
-                        "acodec": "AAC",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "transport": "DASH",
-                    },
-                    # H264 AAC
-                    {
-                        "transport": "DASH",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "vcodec": "H264",
-                        "acodec": "AAC",
-                        "container": "TS",
-                    },
-                    {
-                        "transport": "DASH",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "vcodec": "H264",
-                        "acodec": "AAC",
-                        "container": "ISOBMFF",
-                    },
-                    {
-                        "container": "MP4",
-                        "vcodec": "H264",
-                        "acodec": "AAC",
-                        "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
-                        "transport": "DASH",
-                    },
-                ],
-                "model": self.config["client"]["model"],
-                "maxVideoFormat": "UHD" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "SD", # "HD", "UHD"
-                "hdcpEnabled": "True",
-                "robustness": "HW_SECURE_ALL",
-                "supportedColourSpaces": supported_colour_spaces,
-            },
-            "providerVariantId": variant_id,
-            "parentalControlPin": "null",
-            "personaParentalControlRating": 16
-        }
+        vod_url = 'https://p.sky.com/video/playouts/vod'
 
-        data = json.dumps(data)
-        headers["x-sky-signature"] = self.calculate_signature("POST", url, headers, data)
+        post_data = {
+		  "device": {
+			"capabilities": [
+					#H265 EAC3
+					{
+					  "transport": "DASH",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "vcodec": "H265",
+					  "acodec": "EAC3",
+					  "container": "TS"
+					},
+					{
+					  "transport": "DASH",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "vcodec": "H265",
+					  "acodec": "EAC3",
+					  "container": "ISOBMFF"
+					},
+					{
+					  "container": "MP4",
+					  "vcodec": "H265",
+					  "acodec": "EAC3",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "transport": "DASH"
+					},
 
-        response = self.session.post(url, headers=headers, data=data).json()
-        if response.get("errorCode"):
-            self.log.error(response.get("description"))
-            sys.exit(1)
+					#H264 EAC3
+					{
+					  "transport": "DASH",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "vcodec": "H264",
+					  "acodec": "EAC3",
+					  "container": "TS"
+					},
+					{
+					  "transport": "DASH",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "vcodec": "H264",
+					  "acodec": "EAC3",
+					  "container": "ISOBMFF"
+					},
+					{
+					  "container": "MP4",
+					  "vcodec": "H264",
+					  "acodec": "EAC3",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "transport": "DASH"
+					},
 
-        manifest = response["asset"]["endpoints"][0]["url"]
-        self.license_api = response['protection']['licenceAcquisitionUrl']
-        locale = response["asset"].get("audioTracks", [])[0].get("locale", "de-DE")
+					#H265 AAC
+					{
+					  "transport": "DASH",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "vcodec": "H265",
+					  "acodec": "AAC",
+					  "container": "TS"
+					},
+					{
+					  "transport": "DASH",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "vcodec": "H265",
+					  "acodec": "AAC",
+					  "container": "ISOBMFF"
+					},
+					{
+					  "container": "MP4",
+					  "vcodec": "H265",
+					  "acodec": "AAC",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "transport": "DASH"
+					},
+
+					#H264 AAC
+					{
+					  "transport": "DASH",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "vcodec": "H264",
+					  "acodec": "AAC",
+					  "container": "TS"
+					},
+					{
+					  "transport": "DASH",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "vcodec": "H264",
+					  "acodec": "AAC",
+					  "container": "ISOBMFF"
+					},
+					{
+					  "container": "MP4",
+					  "vcodec": "H264",
+					  "acodec": "AAC",
+					  "protection": "PLAYREADY" if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "WIDEVINE",
+					  "transport": "DASH"
+					},
+				],
+			"model": "Nvidia Shield Android TV",
+			"maxVideoFormat": 'UHD' if self.cdm.device.type == LocalDevice.Types.PLAYREADY else "SD",
+			"hdcpEnabled": 'false',
+			"supportedColourSpaces": [
+			  "DV",
+			  "HDR10",
+			  "SDR"
+			]
+		  },
+		  "client": {
+			"thirdParties": [
+			  "CONVIVA",
+			  "FREEWHEEL"
+			]
+		  },
+		  "parentalControlPin": "null"
+		}
         
+        #now_id = now_id.replace('_HD', '')
+        
+        if len(now_id) < 21:
+            post_data['device']['maxVideoFormat'] = 'HD'
+            post_data['contentId'] = now_id
+        else:
+            post_data['providerVariantId'] = now_id
+            
+        if 'TF' in now_id:
+            post_data['providerVariantId'] = now_id
+            
+        post_data = json.dumps(post_data)
+
+        headers['x-sky-signature'] = self.calculate_signature('POST', '/video/playouts/vod', headers, post_data)
+
+        manifest = json.loads(self.session.post(vod_url, headers=headers, data=post_data).content)
+
+        self.license_api = manifest['protection']['licenceAcquisitionUrl']
+
+        print(f"lic: {self.license_api}")
+
+        dash = manifest["asset"]["endpoints"][0]["url"]
+
+        self.log.info(f'DASH: {dash}')
+
         tracks = Tracks.from_mpd(
-            url=manifest,
+            url=manifest["asset"]["endpoints"][0]["url"],
             session=self.session,
+            #lang=title.original_lang,
             source=self.ALIASES[0]
         )
-        
-        if supported_colour_spaces == ["HDR10"]:
-            for track in tracks.videos:
-                track.hdr10 = True if supported_colour_spaces == ["HDR10"] else False
-        if supported_colour_spaces == ["DV"]:
-            for track in tracks.videos:
-                track.dolbyvison = True if supported_colour_spaces == ["DV"] else False
+        for track in tracks:
+            if track.language.to_alpha3() == 'ori':
+                track.is_original_lang = True
+                track.language = Language.get('eng') # Don't assume
+                for t in tracks:
+                    if t.__class__.__name__ == track.__class__.__name__ and t.language.to_alpha3() == 'deu':
+                        t.is_original_lang = False
+
+            track.needs_proxy = True
 
         return tracks
 
@@ -304,74 +360,101 @@ class WowTV(BaseService):
                 },
                 data=challenge,  # expects bytes
             ).content
-        return res
-
-    @staticmethod
-    def calculate_sky_header(headers: dict) -> str:
-        text_headers = ""
-        for key in sorted(headers.keys()):
-            if key.lower().startswith("x-skyott"):
-                text_headers += key + ": " + headers[key] + "\n"
-        return hashlib.md5(text_headers.encode()).hexdigest()
-
-    def calculate_signature(self, method: str, url: str, headers: dict, payload: str) -> str:
-        to_hash = (
-            "{method}\n{path}\n{response_code}\n{app_id}\n{version}\n{headers_md5}\n" "{timestamp}\n{payload_md5}\n"
-        ).format(
-            method=method,
-            path=urlparse(url).path if url.startswith("http") else url,
-            response_code="",
-            app_id=self.config["client"]["client_sdk"],
-            version="1.0",
-            headers_md5=self.calculate_sky_header(headers),
-            timestamp=int(time.time()),
-            payload_md5=hashlib.md5(payload.encode()).hexdigest(),
-        )
-
-        signature_key = bytes(self.config["security"]["signature_hmac_key_v4"], "utf-8")
-        hashed = hmac.new(signature_key, to_hash.encode("utf8"), hashlib.sha1).digest()
-        signature_hmac = base64.b64encode(hashed).decode("utf8")
-
-        return self.config["security"]["signature_format"].format(
-            client=self.config["client"]["client_sdk"], signature=signature_hmac, timestamp=int(time.time())
-        )
-
-    def get_token(self) -> str:
-        url = self.config["endpoints"]["tokens"]
+            
+            return res
+   
+    def persona(self):
+        persona_url = 'https://persona-store.sky.com/persona-store/personas'
 
         headers = {
-            "accept": "application/vnd.tokens.v1+json",
-            "content-type": "application/vnd.tokens.v1+json",
-            "x-skyott-device": self.config["client"]["device"],
-            "x-skyott-platform": self.config["client"]["platform"],
-            "x-skyott-proposition": self.config["client"]["proposition"],
-            "x-skyott-provider": self.config["client"]["provider"],
-            "x-skyott-territory": self.config["client"]["territory"],
+            'accept': 'application/vnd.persona.v1+json',
+            'x-skyid-token': self.skyCEsidismesso01,
+            'x-skyott-device': 'TV',
+            'x-skyott-platform': 'ANDROIDTV',
+            'x-skyott-proposition': 'NOWTV',
+            'x-skyott-provider': 'NOWTV',
+            'x-skyott-territory': 'DE',
+            'x-skyott-tokentype': 'SSO',
         }
 
-        data = {
+        try:
+            response = json.loads(self.session.get(persona_url, headers=headers).content)
+            return response['personas'][0]['personaId']
+        except:
+            self.log.exit(f" - Unable to get persona, try updating cookies")
+            raise
+
+    def get_user_token(self):
+        token_url = 'https://auth.client.ott.sky.com/auth/tokens'
+
+        headers = {
+            'Accept': 'application/vnd.tokens.v1+json',
+            'Content-Type': 'application/vnd.tokens.v1+json',
+            'X-SkyOTT-Device': 'TV',
+            'X-SkyOTT-Platform': 'ANDROIDTV',
+            'X-SkyOTT-Proposition': 'NOWTV',
+            'X-SkyOTT-Provider': 'NOWTV',
+            'X-SkyOTT-Territory': 'DE',
+        }
+
+        post_data = {
             "auth": {
-                "authScheme": self.config["client"]["auth_scheme"],
-                "authToken": self.session.cookies.get("skyCEsidismesso01"),
-                "authIssuer": self.config["client"]["auth_issuer"],
-                "provider": self.config["client"]["provider"],
-                "providerTerritory": self.config["client"]["territory"],
-                "proposition": self.config["client"]["proposition"],
+                "authScheme": "MESSO",
+                "authToken": self.skyCEsidismesso01,
+                "authIssuer": "NOWTV",
+                "personaId": self.persona_id,
+                "provider": "NOWTV",
+                "providerTerritory": 'DE',
+                "proposition": "NOWTV"
             },
             "device": {
-                "type": self.config["client"]["device"],
-                "platform": self.config["client"]["platform"],
-                "id": self.config["client"]["id"],
-                "drmDeviceId": self.config["client"]["drm_device_id"],
-            },
+                "type": 'TV',
+                "platform": 'ANDROIDTV',
+                "id": 'Z-sKxKApCe7c3dBMGAYtKU8NmWKDcWrCKobKpnVTLqc', #Not so irrelavant anymore
+                "drmDeviceId": 'UNKNOWN'
+            }
         }
 
-        data = json.dumps(data)
-        headers["Content-MD5"] = hashlib.md5(data.encode("utf-8")).hexdigest()
+        post_data = json.dumps(post_data)
 
-        response = self.session.post(url, headers=headers, data=data).json()
-        if response.get("message"):
-            self.log.error(f"{response['message']}")
-            sys.exit(1)
+        headers['Content-MD5'] = hashlib.md5(post_data.encode('utf-8')).hexdigest()
 
-        return response["userToken"]
+        token_request = json.loads(self.session.post(token_url, headers=headers, data=post_data).content)
+
+        if token_request['userToken'] == None:
+            self.log.exit(f" - Unable to get userToken")
+            raise
+
+        return token_request['userToken']
+            
+    def calculate_signature(self, method, path, headers, payload, timestamp=None):
+        app_id = 'IE-NOWTV-ANDROID-v1'
+        signature_key = bytearray('5f8RLBppaqKGO8bwKwNifjZ6bM8zXCVwkAK7hkhq3PS4pf', 'utf-8')
+        sig_version = '1.0'
+
+        if not timestamp:
+            timestamp = int(time.time())
+
+        #print('path: {}'.format(path))
+
+        text_headers = ''
+        for key in sorted(headers.keys()):
+            if key.lower().startswith('x-skyott'):
+                text_headers += key + ': ' + headers[key] + '\n'
+        #print(text_headers)
+        headers_md5 = hashlib.md5(text_headers.encode()).hexdigest()
+        #print(headers_md5)
+
+        if sys.version_info[0] > 2 and isinstance(payload, str):
+            payload = payload.encode('utf-8')
+            payload_md5 = hashlib.md5(payload).hexdigest()
+
+        to_hash = ('{method}\n{path}\n{response_code}\n{app_id}\n{version}\n{headers_md5}\n'
+                '{timestamp}\n{payload_md5}\n').format(method=method, path=path,
+                    response_code='', app_id=app_id, version=sig_version,
+                    headers_md5=headers_md5, timestamp=timestamp, payload_md5=payload_md5)
+        #print(to_hash)
+
+        hashed = hmac.new(signature_key, to_hash.encode('utf8'), hashlib.sha1).digest()
+        signature = base64.b64encode(hashed).decode('utf8')
+        return 'SkyOTT client="{}",signature="{}",timestamp="{}",version="{}"'.format(app_id, signature, timestamp, sig_version)

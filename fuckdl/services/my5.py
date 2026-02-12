@@ -187,3 +187,4 @@ class MY5(BaseService):
         manifest += ".mpd" if not manifest.endswith("mpd") else ""
 
         return manifest, lic_url
+

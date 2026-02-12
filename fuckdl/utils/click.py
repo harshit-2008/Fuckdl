@@ -13,9 +13,8 @@ log = logging.getLogger("click")
 
 
 class ContextData:
-    def __init__(self, config, downloader, vaults, cdm, profile=None, cookies=None, credentials=None):
+    def __init__(self, config, vaults, cdm, profile=None, cookies=None, credentials=None):
         self.config = config
-        self.downloader = downloader
         self.vaults = vaults
         self.cdm = cdm
         self.profile = profile
@@ -28,13 +27,13 @@ class AliasedGroup(click.Group):
         rv = click.Group.get_command(self, ctx, cmd_name)
         if rv is not None:
             setattr(services, cmd_name, getattr(
-                importlib.import_module(f"fuckdl.services.{cmd_name.lower()}"), cmd_name
+                importlib.import_module(f"vinetrimmer.services.{cmd_name.lower()}"), cmd_name
             ))
             return rv
 
         for key, aliases in services.SERVICE_MAP.items():
             if cmd_name.lower() in map(str.lower, aliases):
-                setattr(services, key, getattr(importlib.import_module(f"fuckdl.services.{key.lower()}"), key))
+                setattr(services, key, getattr(importlib.import_module(f"vinetrimmer.services.{key.lower()}"), key))
                 return click.Group.get_command(self, ctx, key)
 
         service = services.get_service_key(cmd_name)
@@ -56,9 +55,9 @@ class AliasedGroup(click.Group):
                 if title_id:
                     ctx.params["service_name"] = x.__name__
                     setattr(services, x.__name__, getattr(
-                        importlib.import_module(f"fuckdl.services.{x.__name__.lower()}"), x.__name__
+                        importlib.import_module(f"vinetrimmer.services.{x.__name__.lower()}"), x.__name__
                     ))
-                    importlib.import_module(f"fuckdl.services.{x.__name__.lower()}")
+                    importlib.import_module(f"vinetrimmer.services.{x.__name__.lower()}")
                     ctx.params["title"] = cmd_name
                     return click.Group.get_command(self, ctx, x.__name__)
 
@@ -178,9 +177,6 @@ def range_param(ctx, param, value):
         "hlg": "HLG",
         "dv": "DV",
         "dovi": "DV",
-        "dvhdr": "DVHDR",
-        "hdrdv": "DVHDR",
-        "hybrid": "HYBRID",
     })
 
 
@@ -256,3 +252,4 @@ def wanted_param(ctx, param, value):
 
     if value:
         return parse_tokens(*re.split(r"\s*[,;]\s*", value))
+

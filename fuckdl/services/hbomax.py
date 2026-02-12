@@ -24,16 +24,18 @@ from fuckdl.utils.widevine.device import LocalDevice
 
 class HBOMax(BaseService):
     """
-    Service code for HBOMax's streaming service (https://hbomax.com).
+    Service code for HBO Max streaming service (https://play.hbomax.com).
 
     \b
     Authorization: Cookies
     Security: UHD@L1 FHD@L1 HD@L3
     """
 
-    ALIASES = ["HMAX", "hbomax"]
+    ALIASES = ["HBOMAX", "hbomax"]
 
-    TITLE_RE = r"^(?:https?://(?:www\.|play\.)?hbomax\.com/)?(?P<type>[^/]+)/(?P<id>[^/]+)"
+    TITLE_RE = [
+        r"^(?:https?:\/\/(?:www\.|play\.)?(?:max|hbomax)\.com\/)?(?P<type>[^/]+)/(?:[^/]+/)?(?P<id>[^/]+)",
+    ]
 
     VIDEO_CODEC_MAP = {
         "H264": ["avc1"],
@@ -47,19 +49,15 @@ class HBOMax(BaseService):
     }
 
     @staticmethod
-    @click.command(name="HBOMax", short_help="https://hbomax.com")
+    @click.command(name="HBOMax", short_help="https://play.hbomax.com")
     @click.argument("title", type=str, required=False)
-    @click.option("-ss", "--segmented-subs", is_flag=True, default=False, help="Force segmented subtitles.")
-    # @click.option("-m", "--movie", is_flag=True, default=False, help="Title is a movie.")
     @click.pass_context
     def cli(ctx, **kwargs):
         return HBOMax(ctx, **kwargs)
 
-    def __init__(self, ctx, title, segmented_subs):
+    def __init__(self, ctx, title):
         super().__init__(ctx)
         self.title = self.parse_title(ctx, title)
-        self.segmented_subs = segmented_subs
-        # self.movie = movie
 
         self.cdm = ctx.obj.cdm
 
@@ -67,23 +65,9 @@ class HBOMax(BaseService):
         self.acodec = ctx.parent.params["acodec"]
         self.range = ctx.parent.params["range_"]
         self.alang = ctx.parent.params["alang"]
-        # self.api_region = self.config.get(ctx.obj.profile, {}).get('api_region', 'comet-latam')
-
-        # self.license_api = None
-        # self.client_grant = None
-        # self.auth_grant = None
-        # self.profile_id = None
-        # self.entitlements = None
-        
-        if (ctx.parent.params.get("quality") or 0) > 1080 and self.vcodec != "H265":
-            self.log.info(" + Switched video codec to H265 to be able to get 2160p video track")
+        self.quality = ctx.parent.params["quality"] or 1080
+        if self.range == 'HDR10':
             self.vcodec = "H265"
-
-        if self.range in ("HDR10", "DV") and self.vcodec != "H265":
-            self.log.info(f" + Switched video codec to H265 to be able to get {self.range} dynamic range")
-            self.vcodec = "H265"
-        
-
         
         self.configure()
 
@@ -105,7 +89,6 @@ class HBOMax(BaseService):
                                x["attributes"] and x["attributes"]["alternateId"] == external_id and x["attributes"].get("originalName")][0]["attributes"]
             content_title = content_data["originalName"]
 
-        
         if content_type == "sport" or content_type =="event":
             included_dt = response.json()["included"]
 
@@ -128,12 +111,12 @@ class HBOMax(BaseService):
                 source=self.ALIASES[0],
                 service_data=event_data,
             )
-        
+
         if content_type == "movie" or content_type == "standalone":
             metadata = self.session.get(
                 url=f"https://default.prd.api.hbomax.com/content/videos/{external_id}/activeVideoForShow?&include=edit"
             ).json()['data']
-            
+
             try:
                 edit_id = metadata['relationships']['edit']['data']['id']
             except:
@@ -163,23 +146,20 @@ class HBOMax(BaseService):
                 alias = "-%s-page-rail-episodes-tabbed-content" % (content_type)
 
             included_dt = response.json()["included"]
-            
-
             season_data = [data for included in included_dt for key, data in included.items()
                            if key == "attributes" for k,d in data.items() if alias in str(d).lower()][0]
-
             season_data = season_data["component"]["filters"][0]
             
             seasons = [int(season["value"]) for season in season_data["options"]]
             
             season_parameters = [(int(season["value"]), season["parameter"]) for season in season_data["options"]
                 for season_number in seasons if int(season["value"]) == int(season_number)]
-
             if not season_parameters:
                 raise self.log.exit("season(s) %s not found")
 
             for (value, parameter) in season_parameters:
                 data = self.session.get(url="https://default.prd.api.hbomax.com/cms/collections/generic-show-page-rail-episodes-tabbed-content?include=default&pf[show.id]=%s&%s" % (external_id, parameter)).json()
+                #PARA MAS DE 100 EPISODIOS &page[items.number]=2
                 try:
                     episodes_dt = sorted([dt for dt in data["included"] if "attributes" in dt and "videoType" in 
                                     dt["attributes"] and dt["attributes"]["videoType"] == "EPISODE" 
@@ -188,7 +168,7 @@ class HBOMax(BaseService):
                     raise self.log.exit("season episodes were not found")
                 
                 episodes.extend(episodes_dt)
-            
+             
             titles = []
             release_date = episodes[0]["attributes"].get("airDate") or episodes[0]["attributes"].get("firstAvailableDate")
             year = datetime.strptime(release_date, '%Y-%m-%dT%H:%M:%SZ').year
@@ -219,153 +199,149 @@ class HBOMax(BaseService):
         response = self.session.post(
             url=self.config['endpoints']['playbackInfo'],
             json={
-                'appBundle': 'beam',
-                'consumptionType': 'streaming',
-                'deviceInfo': {
-                    'deviceId': '2dec6cb0-eb34-45f9-bbc9-a0533597303c',
-                    'browser': {
-                        'name': 'chrome',
-                        'version': '113.0.0.0',
-                    },
-                    'make': 'Microsoft',
-                    'model': 'XBOX-Unknown',
-                    'os': {
-                        'name': 'Windows',
-                        'version': '113.0.0.0',
-                    },
-                    'platform': 'XBOX',
-                    'deviceType': 'xbox',
-                    'player': {
-                        'sdk': {
-                            'name': 'Beam Player Console',
-                            'version': '1.0.2.4',
-                        },
-                        'mediaEngine': {
-                            'name': 'GLUON_BROWSER',
-                            'version': '1.20.1',
-                        },
-                        'playerView': {
-                            'height': 1080,
-                            'width': 1920,
-                        },
-                    },
-                },
-                'editId': edit_id,
-                'capabilities': {
-                    'manifests': {
-                        'formats': {
-                            'dash': {},
-                        },
-                    },
-                'codecs': {
-                    'video': {
-                        'hdrFormats': [
-                            'hlg',
-                            'hdr10',
-                            'dolbyvision5',
-                            'dolbyvision8',
-                        ],
-                        'decoders': [
-                            {
-                                'maxLevel': '6.2',
-                                'codec': 'h265',
-                                'levelConstraints': {
-                                    'width': {
-                                        'min': 1920,
-                                        'max': 3840,
-                                    },
-                                    'height': {
-                                        'min': 1080,
-                                        'max': 2160,
-                                    },
-                                    'framerate': {
-                                        'min': 15,
-                                        'max': 60,
-                                    },
+                "appBundle": "com.wbd.stream",
+                "applicationSessionId": str(uuid.uuid4()),
+                "capabilities": {
+                    "codecs": {
+                        "audio": {
+                            "decoders": [
+                                {
+                                    "codec": "eac3",
+                                    "profiles": [
+                                        "lc",
+                                        "he",
+                                        "hev2",
+                                        "xhe",
+                                        'atmos',
+                                    ]
                                 },
-                                'profiles': [
-                                    'main',
-                                    'main10',
-                                ],
-                            },
-                            {
-                                'maxLevel': '4.2',
-                                'codec': 'h264',
-                                'levelConstraints': {
-                                    'width': {
-                                        'min': 640,
-                                        'max': 3840,
+                                {
+                                    'codec': 'ac3',
+                                    'profiles': []
+                                }
+                            ]
+                        },
+                        "video": {
+                            "decoders": [
+                                {
+                                    "codec": "h264",
+                                    "levelConstraints": {
+                                        "framerate": {
+                                            "max": 960,
+                                            "min": 0
+                                        },
+                                        "height": {
+                                            "max": 2200,
+                                            "min": 64
+                                        },
+                                        "width": {
+                                            "max": 3900,
+                                            "min": 64
+                                        }
                                     },
-                                    'height': {
-                                        'min': 480,
-                                        'max': 2160,
-                                    },
-                                    'framerate': {
-                                        'min': 15,
-                                        'max': 60,
-                                    },
+                                    "maxLevel": "6.2",
+                                    "profiles": [
+                                        "baseline",
+                                        "main",
+                                        "high"
+                                    ]
                                 },
-                                'profiles': [
-                                    'high',
-                                    'main',
-                                    'baseline',
-                                ],
-                            },
-                        ],
-                    },
-                    'audio': {
-                        'decoders': [
-                            {
-                                'codec': 'aac',
-                                'profiles': [
-                                    'lc',
-                                    'he',
-                                    'hev2',
-                                    'xhe',
-                                ],
-                            },
-                        ],
-                    },
-                },
-                'devicePlatform': {
-                    'network': {
-                        'lastKnownStatus': {
-                            'networkTransportType': 'unknown',
-                        },
-                        'capabilities': {
-                            'protocols': {
-                                'http': {
-                                    'byteRangeRequests': True,
-                                },
-                            },
-                        },
-                    },
-                    'videoSink': {
-                        'lastKnownStatus': {
-                            'width': 1290,
-                            'height': 2796,
-                        },
-                        'capabilities': {
-                            'colorGamuts': [
-                                'standard',
-                                'wide',
+                                {
+                                    "codec": "h265",
+                                    "levelConstraints": {
+                                        "framerate": {
+                                            "max": 960,
+                                            "min": 0
+                                        },
+                                        "height": {
+                                            "max": 2200,
+                                            "min": 144
+                                        },
+                                        "width": {
+                                            "max": 3900,
+                                            "min": 144
+                                        }
+                                    },
+                                    "maxLevel": "6.2",
+                                    "profiles": [
+                                        "main",
+                                        "main10"
+                                    ]
+                                }
                             ],
-                            'hdrFormats': [
-                                'dolbyvision',
-                                'hdr10plus',
-                                'hdr10',
-                                'hlg',
-                            ],
-                        },
+                            "hdrFormats": [
+                                'dolbyvision8', 'dolbyvision5', 'dolbyvision',
+                                'hdr10plus', 'hdr10', 'hlg'
+                            ]
+                        }
                     },
+                    "contentProtection": {
+                        "contentDecryptionModules": [
+                            {
+                                "drmKeySystem": 'playready',
+                                "maxSecurityLevel": 'sl3000',
+
+                            }
+                        ]
+                    },
+                    "devicePlatform": {
+                        "network": {
+                            "capabilities": {
+                                "protocols": {
+                                    "http": {"byteRangeRequests": True}
+                                }
+                            },
+                            "lastKnownStatus": {"networkTransportType": "wifi"}
+                        },
+                        "videoSink": {
+                            "capabilities": {
+                                "colorGamuts": ["standard"],
+                                "hdrFormats": []
+                            },
+                            "lastKnownStatus": {
+                                "height": 2200,
+                                "width": 3900
+                            }
+                        }
+                    },
+                    "manifests": {"formats": {"dash": {}}}
                 },
+                "consumptionType": "streaming",
+                "deviceInfo": {
+                    "browser": {
+                        "name": "Discovery Player Android androidTV",
+                        "version": "1.8.1-canary.102"
+                    },
+                    "deviceId": "",
+                    "deviceType": "androidtv",
+                    "make": "NVIDIA",
+                    "model": "SHIELD Android TV",
+                    "os": {
+                        "name": "ANDROID",
+                        "version": "10"
+                    },
+                    "platform": "android",
+                    "player": {
+                        "mediaEngine": {
+                            "name": "exoPlayer",
+                            "version": "1.2.1"
+                        },
+                        "playerView": {
+                            "height": 2160,
+                            "width": 3840
+                        },
+                        "sdk": {
+                            "name": "Discovery Player Android androidTV",
+                            "version": "1.8.1-canary.102"
+                        }
+                    }
                 },
-                'gdpr': False,
-                'firstPlay': False,
-                'playbackSessionId': str(uuid.uuid4()),
-                'applicationSessionId': str(uuid.uuid4()),
-                'userPreferences': {},
-                'features': [],
+                "editId": edit_id,
+                "firstPlay": True,
+                "gdpr": False,
+                "playbackSessionId": str(uuid.uuid4()),
+                #'applicationSessionId': str(uuid.uuid4()),
+                "userPreferences": {"uiLanguage": "en"}
             }
         )
 
@@ -379,30 +355,241 @@ class HBOMax(BaseService):
         fallback_url = fallback_url.replace('fly', 'akm').replace('gcp', 'akm')
 
         try:
-            self.wv_license_url = playback_data["drm"]["schemes"]["widevine"]["licenseUrl"]
-            drm_protection_enabled = True
-        except (KeyError, IndexError):
-            drm_protection_enabled = False
-            
-        try:
             self.pr_license_url = playback_data["drm"]["schemes"]["playready"]["licenseUrl"]
             drm_protection_enabled = True
         except (KeyError, IndexError):
             drm_protection_enabled = False
 
-        manifest_url = fallback_url.replace('_fallback', '')
-        manifest_data = self.session.get(manifest_url).text
-        print("MPD URL -", manifest_url)
+        try:
+            self.wv_license_url = playback_data["drm"]["schemes"]["widevine"]["licenseUrl"]
+            drm_protection_enabled = True
+        except (KeyError, IndexError):
+            drm_protection_enabled = False
 
-        tracks: Tracks = Tracks.from_mpd(
-            url=manifest_url,
-            data=manifest_data,
-            source=self.ALIASES[0]
-        )
+        manifest_url = fallback_url.replace('_fallback', '')
+        self.log.debug(f"Manifest URL: {manifest_url}")
         
+        # ==============================================
+        # FIXED PATCH - WITHOUT DEPENDING ON self.ctx
+        # ==============================================
+        import tempfile
+        import subprocess
+        import os
+        import json
+        
+        # Create temporary file for MPD
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.mpd', delete=False, encoding='utf-8') as tmp:
+            mpd_temp_path = tmp.name
+        
+        # Variable for cookie_str (avoids "referenced before assignment")
+        cookie_str = ""
+        
+        try:
+            # ===================================================================
+            # GET COOKIES - MULTIPLE SOURCES
+            # ===================================================================
+            essential_cookies = ['st', 'session', 'transientID']
+            filtered_cookies = {}
+            
+            # METHOD 1: Look in vinetrimmer cookies folder
+            cookies_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'cookies')
+            cookies_dir = os.path.abspath(cookies_dir)
+            cookies_file = os.path.join(cookies_dir, "hbomax.txt")
+            
+            self.log.debug(f"Looking for cookies in: {cookies_file}")
+            
+            if os.path.exists(cookies_file):
+                self.log.debug(f"✅ Cookie file found")
+                with open(cookies_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('#') or not line or '\t' not in line:
+                            continue
+                        
+                        parts = line.split('\t')
+                        if len(parts) >= 7:
+                            cookie_name = parts[5]
+                            cookie_value = parts[6]
+                            
+                            if cookie_name in essential_cookies:
+                                filtered_cookies[cookie_name] = cookie_value
+                                self.log.debug(f"  Cookie: {cookie_name} = {cookie_value[:20]}...")
+            
+            # METHOD 2: If no file, use session cookies
+            if not filtered_cookies:
+                self.log.debug("Using session cookies...")
+                try:
+                    cookie_dict = self.session.cookies.get_dict()
+                    filtered_cookies = {k: v for k, v in cookie_dict.items() if k in essential_cookies}
+                except Exception as e:
+                    self.log.debug(f"Could not get session cookies: {e}")
+            
+            if not filtered_cookies:
+                self.log.error("❌ No essential cookies found!")
+                # Try hardcoded list of common cookies
+                self.log.info("Trying with common cookies...")
+                filtered_cookies = {}
+                if hasattr(self.session, 'cookies'):
+                    all_cookies = self.session.cookies.get_dict()
+                    for cookie in ['st', 'session', 'transientID', 'sso', 'access_token']:
+                        if cookie in all_cookies:
+                            filtered_cookies[cookie] = all_cookies[cookie]
+            
+            self.log.debug(f"Cookies to use: {list(filtered_cookies.keys())}")
+            
+            if not filtered_cookies:
+                raise ValueError("No authentication cookies found")
+            
+            # ===================================================================
+            # BUILD COOKIE STRING
+            # ===================================================================
+            cookie_parts = []
+            for key, value in filtered_cookies.items():
+                if key == 'session' and value.startswith('{'):
+                    try:
+                        # Try to escape JSON
+                        session_json = json.loads(value)
+                        escaped_value = json.dumps(session_json).replace('"', '\\"')
+                        cookie_parts.append(f'{key}={escaped_value}')
+                    except:
+                        cookie_parts.append(f'{key}={value}')
+                else:
+                    cookie_parts.append(f'{key}={value}')
+            
+            cookie_str = '; '.join(cookie_parts)
+            self.log.debug(f"Cookie string prepared ({len(cookie_str)} chars)")
+            
+            # ===================================================================
+            # MAIN METHOD: SIMPLE CURL
+            # ===================================================================
+            # Use the SAME command that worked in your manual test
+            curl_cmd = f'curl -s -L -H "User-Agent: Mozilla/5.0" -H "Referer: https://play.hbomax.com/" -H "Cookie: {cookie_str}" -o "{mpd_temp_path}" "{manifest_url}"'
+            
+            self.log.debug(f"Executing curl: {curl_cmd[:100]}...")
+            
+            result = subprocess.run(curl_cmd, shell=True, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                with open(mpd_temp_path, 'r', encoding='utf-8') as f:
+                    manifest_data = f.read()
+                
+                # Verify if it's valid MPD
+                if '<MPD' in manifest_data or '<mpd' in manifest_data:
+                    self.log.debug(f"✅ MPD downloaded successfully ({len(manifest_data)} bytes)")
+                    
+                    tracks: Tracks = Tracks.from_mpd(
+                        url=manifest_url,
+                        data=manifest_data,
+                        source=self.ALIASES[0]
+                    )
+                    
+                else:
+                    # DEBUG: Save what was received
+                    debug_content = manifest_data[:500]
+                    self.log.error(f"❌ Not valid MPD. Content: {debug_content}")
+                    
+                    # Check if it's the 400 error
+                    if "Request Header Or Cookie Too Large" in manifest_data:
+                        self.log.error("⚠️  ERROR: Still sending too many cookies/headers")
+                        self.log.debug(f"Cookie string used: {cookie_str[:100]}...")
+                        raise ValueError("Headers too large")
+                    else:
+                        raise ValueError("Response is not MPD")
+            else:
+                self.log.error(f"❌ CURL failed: {result.stderr[:200]}")
+                raise ValueError(f"CURL error: {result.returncode}")
+            
+        except Exception as e:
+            self.log.error(f"❌ Error in main method: {e}")
+            
+            # ===================================================================
+            # FALLBACK: TRY WITHOUT COOKIES OR WITH FEWER HEADERS
+            # ===================================================================
+            try:
+                self.log.info("🔄 Trying simple fallback...")
+                
+                # Test 1: Only with Referer (no cookies)
+                curl_simple = f'curl -s -L -H "Referer: https://play.hbomax.com/" -o "{mpd_temp_path}" "{manifest_url}"'
+                result = subprocess.run(curl_simple, shell=True, capture_output=True, text=True, timeout=20)
+                
+                if result.returncode == 0:
+                    with open(mpd_temp_path, 'r', encoding='utf-8') as f:
+                        manifest_data = f.read()
+                    
+                    if '<MPD' in manifest_data or '<mpd' in manifest_data:
+                        self.log.debug("✅ MPD obtained without cookies (surprise!)")
+                        
+                        tracks: Tracks = Tracks.from_mpd(
+                            url=manifest_url,
+                            data=manifest_data,
+                            source=self.ALIASES[0]
+                        )
+                    else:
+                        # Test 2: Only with st token (most important cookie)
+                        if 'st' in filtered_cookies:
+                            st_cookie = filtered_cookies['st']
+                            curl_st_only = f'curl -s -L -H "Referer: https://play.hbomax.com/" -H "Cookie: st={st_cookie}" -o "{mpd_temp_path}" "{manifest_url}"'
+                            
+                            result = subprocess.run(curl_st_only, shell=True, capture_output=True, text=True, timeout=20)
+                            
+                            if result.returncode == 0:
+                                with open(mpd_temp_path, 'r', encoding='utf-8') as f:
+                                    manifest_data = f.read()
+                                
+                                if '<MPD' in manifest_data or '<mpd' in manifest_data:
+                                    self.log.debug("✅ MPD obtained only with st token")
+                                    
+                                    tracks: Tracks = Tracks.from_mpd(
+                                        url=manifest_url,
+                                        data=manifest_data,
+                                        source=self.ALIASES[0]
+                                    )
+                                else:
+                                    raise ValueError("Fallback also failed")
+                            else:
+                                raise ValueError("CURL with only st failed")
+                        else:
+                            raise ValueError("No st token available")
+                else:
+                    raise ValueError("Simple CURL failed")
+                    
+            except Exception as e2:
+                self.log.error(f"❌ All methods failed: {e2}")
+                
+                # ===================================================================
+                # LAST ATTEMPT: HBO FALLBACK URL
+                # ===================================================================
+                try:
+                    self.log.info("🔥 Last attempt: HBO fallback URL...")
+                    
+                    response = self.session.get(fallback_url, timeout=30)
+                    response.raise_for_status()
+                    manifest_data = response.text
+                    
+                    tracks: Tracks = Tracks.from_mpd(
+                        url=fallback_url,
+                        data=manifest_data,
+                        source=self.ALIASES[0]
+                    )
+                    self.log.debug("✅ MPD obtained via fallback URL")
+                    
+                except Exception as e3:
+                    self.log.error(f"💥 Total failure: {e3}")
+                    raise
+        finally:
+            # Clean up temporary file
+            try:
+                if os.path.exists(mpd_temp_path):
+                    os.unlink(mpd_temp_path)
+            except:
+                pass
+        
+        # ==============================================
+        # TRACK PROCESSING (same as before)
+        # ==============================================
         tracks.videos = self.dedupe(tracks.videos)
         tracks.audios = self.dedupe(tracks.audios)
-        
+
         # remove partial subs
         tracks.subtitles.clear()
 
@@ -435,18 +622,20 @@ class HBOMax(BaseService):
             track.needs_proxy = False
             if isinstance(track, VideoTrack):
                 codec = track.extra[0].get("codecs")
+                supplementalcodec = track.extra[0].get("{urn:scte:dash:scte214-extensions}supplementalCodecs") or ""
                 #track.hdr10 = codec[0:4] in ("hvc1", "hev1") and codec[5] == "2"
                 track.hdr10 = track.dvhdr
-                track.dv = codec[0:4] in ("dvh1", "dvhe")
+                track.dv = codec[0:4] in ("dvh1", "dvhe") or supplementalcodec[0:4] in ("dvh1", "dvhe")
+                    
             if isinstance(track, TextTrack) and track.codec == "":
                 track.codec = "webvtt"
+                
+            if isinstance(track, AudioTrack):
+                role = track.extra[1].find("Role")
+                if role is not None and role.get("value") in ["description", "alternative", "alternate"]:
+                    track.descriptive = True
 
         title.service_data['info'] = video_info
-        
-        for track in tracks.audios:
-            role = track.extra[1].find("Role")
-            if role is not None and role.get("value") in ["description", "alternative", "alternate"]:
-                track.descriptive = True
 
         return tracks
 
@@ -478,20 +667,19 @@ class HBOMax(BaseService):
                 url=self.wv_license_url,
                 data=challenge  # expects bytes
             ).content
-        
 
     def configure(self):
         token = self.session.cookies.get_dict()["st"]
         device_id = json.loads(self.session.cookies.get_dict()["session"])
         if self.cdm.device.type == LocalDevice.Types.PLAYREADY:
             self.session.headers.update({
-                'User-Agent': 'BEAM-Android/1.0.0.104 (SONY/XR-75X95EL)',
+                'User-Agent': 'BEAM-Android/5.0.0 (motorola/moto g(6) play)',
                 'Accept': 'application/json, text/plain, */*',
                 'Content-Type': 'application/json',
-                'x-disco-client': 'SAMSUNGTV:124.0.0.0:beam:4.0.0.118',
-                'x-disco-params': 'realm=bolt,bid=beam,features=ar',
-                'x-device-info': 'beam/4.0.0.118 (Samsung/Samsung-Unknown; Tizen/124.0.0.0; f198a6c1-c582-4725-9935-64eb6b17c3cd/87a996fa-4917-41ae-9b6d-c7f521f0cb78)',
-                'traceparent': '00-315ac07a3de9ad1493956cf1dd5d1313-988e057938681391-01',
+                'x-disco-client': 'ANDROID:9:beam:5.0.0',
+                'x-disco-params': 'realm=bolt,bid=beam,features=ar,rr',
+                'x-device-info': 'BEAM-Android/5.0.0 (motorola/moto g(6) play; ANDROID/9; 9cac27069847250f/b6746ddc-7bc7-471f-a16c-f6aaf0c34d26)',
+                'traceparent': '00-053c91686df1e7ee0b0b0f7fda45ee6a-f5a98d6877ba2515-01',
                 'tracestate': f'wbd=session:{device_id}',
                 'Origin': 'https://play.hbomax.com',
                 'Referer': 'https://play.hbomax.com/',
@@ -517,7 +705,7 @@ class HBOMax(BaseService):
 
     def get_device_token(self):
         response = self.session.post(
-            'https://default.prd.api.hbomax.com/session-context/headwaiter/v1/bootstrap',
+            'https://default.any-any.prd.api.hbomax.com/session-context/headwaiter/v1/bootstrap', # any-any can be removed
         )
         response.raise_for_status()
 
@@ -538,8 +726,7 @@ class HBOMax(BaseService):
         periods = xml["MPD"]["Period"]
         if isinstance(periods, dict):
             periods = [periods]
-        #period = max(periods, key=lambda p: int(p.get("@id", -1)))
-        period = periods[-1]
+        period = periods[-1] # Grab the last period
 
         adaptation_sets = period.get("AdaptationSet", [])
         if isinstance(adaptation_sets, dict):
@@ -547,7 +734,7 @@ class HBOMax(BaseService):
 
         subtitles = []
         success_count = 0
-        
+        fallback = False
         for adaptation_set in adaptation_sets:
             if adaptation_set["@contentType"] != "text":
                 continue
@@ -567,26 +754,22 @@ class HBOMax(BaseService):
             language = adaptation_set["@lang"]
             sub_type = "sdh" if is_sdh else adaptation_set["Role"]["@value"]
             sub_path = rep["SegmentTemplate"]["@media"]
-            segments = int(rep["SegmentTemplate"]["@startNumber"])
+            segments = int(rep["SegmentTemplate"]["@startNumber"]) # The startsnumber will be the highest for the last period ie != 1
             base_url = manifest_url.rsplit('/', 1)[0]
             suffix, name = sub_types[sub_type]
-            use_fallback = False
 
-            if not self.segmented_subs:
-                path = "/".join(sub_path.split("/", 2)[:2])
-                url = f"{base_url}/{path}/{language}{suffix}"
-                if success_count < 3:
-                    try:
-                        res = self.session.head(url)
-                        if res.status_code == 200:
-                            success_count += 1
-                        else:
-                            use_fallback = True
-                    except requests.exceptions.RequestException:
-                        self.segmented_subs = True
-                        self.log.warning("Falling back to segmented subs...")
+            path = "/".join(sub_path.split("/", 2)[:2])
+            url = f"{base_url}/{path}/{language}{suffix}"
 
-            if self.segmented_subs or use_fallback:
+            if success_count < 3 and not fallback:
+                try:
+                    res = self.session.head(url=url)
+                    success_count += 1
+                except requests.exceptions.RequestException:
+                    fallback = True
+                    self.log.warning("Falling back to segmented subs...")
+            
+            if fallback:
                 url = [
                     f"{base_url}/{sub_path}".replace("$Number$", str(x))
                     for x in range(1, segments + 1)
@@ -632,3 +815,4 @@ class HBOMax(BaseService):
         filtered_items = list({item.url: item for item in items}.values())
 
         return filtered_items
+

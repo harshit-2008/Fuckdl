@@ -5,7 +5,7 @@ import re
 import sqlite3
 import sys
 
-from fuckdl.utils.AtomicSQL import AtomicSQL
+from vinetrimmer.utils.AtomicSQL import AtomicSQL
 
 """
 Add keys to key vault. File should have one KID:KEY per-line.
@@ -14,7 +14,7 @@ Optionally you can also put `:<title here>` at the end (after `KEY`).
 
 parser = argparse.ArgumentParser(
     "Key Vault DB batch adder/updater",
-    description="Simple script to add or update key information to a fuckdl key vault db"
+    description="Simple script to add or update key information to a vinetrimmer key vault db"
 )
 parser.add_argument(
     "-t", "--table",

@@ -42,7 +42,7 @@ class BaseDevice(ABC):
             name=self.__class__.__name__,
             items=", ".join([f"{k}={repr(v)}" for k, v in self.__dict__.items()])
         )
-        
+
     def get_name(self):
         return self.__class__.__name__
 
@@ -349,11 +349,9 @@ class RemoteDevice(BaseDevice):
         self.security_level = security_level
         self.name = name
         self.host = host
-        self.api_vault=api_vault
+        self.api_vault=api_vault                                
         self.key = key
         self.device = device
-        self.get_license_request_path = "/get-request"
-        self.get_keys_path = "/decrypt-response"
 
         self.sessions = {}
 
@@ -377,58 +375,232 @@ class RemoteDevice(BaseDevice):
             pssh = Box.build(pssh)
         if isinstance(pssh, bytes):
             pssh = base64.b64encode(pssh).decode()
-            
-        self.pssh = pssh
 
-        res = self.session(self.host+self.get_license_request_path, {"init_data": self.pssh, "service_certificate": session.signed_device_certificate, "scheme": self.device, "service": service_name})
-        
-        self.license_request = res["challenge"]
+        res = self.session("GetChallenge", {
+            "init": pssh,
+            "cert": session.signed_device_certificate,
+            "raw": session.raw,
+            "licensetype": "OFFLINE" if session.offline else "STREAMING",
+            "device": self.device,
+            "service": service_name
+        })
+
         self.api_session_id = res["session_id"]
 
-        return base64.b64decode(self.license_request)
+        return base64.b64decode(res["challenge"])
 
     def parse_license(self, session, license_res):
-      
-        if (isinstance(license_res, dict) and 'keys' in license_res):
-            session.keys.extend([Key(
-                kid=bytes.fromhex(x["kid"]),
-                key_type=x.get("type", "CONTENT"),
-                key=bytes.fromhex(x["key"])
-            ) for x in license_res["keys"]])
-        
-        else:
-            if isinstance(license_res, bytes):
-              license_res = base64.b64encode(license_res).decode()
-              
-            res = self.session(self.host+self.get_keys_path, {"session_id": self.api_session_id, "init_data": self.pssh, "license_request": self.license_request, "license_response": license_res, "scheme": self.device})
+        if isinstance(license_res, bytes):
+            license_res = base64.b64encode(license_res).decode()
 
-            original_keys = res["keys"].replace("\n", " ")
-            keys_separated = original_keys.split("--key ")
-            formatted_keys = []
-            for k in keys_separated:
-                if ":" in k:
-                    key = k.strip()
-                    formatted_keys.append(key)
-            for keys in formatted_keys:
-                session.keys.append((Key(kid=bytes.fromhex(keys.split(":")[0]),key_type="CONTENT",key=bytes.fromhex(keys.split(":")[1]))))
+        res = self.session("GetKeys", {
+            "cdmkeyresponse": license_res,
+            "session_id": self.api_session_id
+        })
+
+        session.keys.extend([Key(
+            kid=bytes.fromhex(x["kid"]),
+            key_type=x.get("type", "CONTENT"),
+            key=bytes.fromhex(x["key"])
+        ) for x in res["keys"]])
 
         return True
 
+    def exchange(self, session, license_res, enc_key_id, hmac_key_id):
+        if isinstance(license_res, bytes):
+            license_res = base64.b64encode(license_res).decode()
+        if isinstance(enc_key_id, bytes):
+            enc_key_id = base64.b64encode(enc_key_id).decode()
+        if isinstance(hmac_key_id, bytes):
+            hmac_key_id = base64.b64encode(hmac_key_id).decode()
+        res = self.session("GetKeysX", {
+            "cdmkeyresponse": license_res,
+            "encryptionkeyid": enc_key_id,
+            "hmackeyid": hmac_key_id,
+            "session_id": self.api_session_id
+        })
+        return base64.b64decode(res["encryption_key"]), base64.b64decode(res["sign_key"])
 
-    def session(self, url, data, retries=3):
+    def session(self, method, params=None):
         res = requests.post(
-            url,
-            headers={"decrypt-labs-api-key": self.key},
-            json=data
+            self.host,
+            json={
+                "method": method,
+                "params": params,
+                "token": self.key
+            }
         ).json()
 
-        if res.get("message") != "success":
-            if "License Response Decryption Process Failed at the very beginning" in res.get("Error", ""):
-                if retries > 0:
-                    return self.session(url, data, retries=retries-1)
-                else:
-                    raise ValueError(f"CDM API returned an error: {res['Error']}")
-            else:
-                raise ValueError(f"CDM API returned an error: {res['Error']}")
+        if res.get("status_code") != 200:
+            raise ValueError(f"CDM API returned an error: {res['status_code']} - {res['message']}")
 
-        return res
+        return res["message"]
+
+
+
+class TPDRemoteDevice(BaseDevice):
+    def __init__(self, *_, type, system_id, security_level, name, host, key, device=None, **__):
+        self.type = self.Types[type] if isinstance(type, str) else type
+        self.system_id = system_id
+        self.security_level = security_level
+        self.name = name
+        self.host = host
+        self.key = key
+        self.device = device
+
+        self.sessions = {}
+
+        self.api_session_id = None
+
+    def set_service_certificate(self, session, certificate):
+        if isinstance(certificate, bytes):
+            certificate = base64.b64encode(certificate).decode()
+
+        # certificate needs to be base64 to be sent off to the API.
+        # it needs to intentionally be kept as base64 encoded SignedMessage.
+
+        session.signed_device_certificate = certificate
+        session.privacy_mode = True
+
+        return True
+
+    def get_license_challenge(self, session):
+        pssh = session.pssh
+
+        req = requests.post(self.host + "/get_challenge",
+            headers={
+                'Content-Type': 'application/json', 'X-Api-Key': self.key
+            },
+            json={
+                "init_data": pssh
+            },
+        )
+        if not req.ok:
+            raise ValueError(req.text)
+
+        res = req.json()
+
+        return base64.b64decode(res["data"])
+
+    def parse_license(self, session, license_res):
+        if isinstance(license_res, bytes):
+            license_res = base64.b64encode(license_res).decode()
+
+        req = requests.post(self.host + "/get_keys",
+            headers={
+                'Content-Type': 'application/json', 'X-Api-Key': self.key
+            },
+            json={
+                "lic_resp": license_res
+            }
+        )
+        if not req.ok:
+            raise ValueError(req.text)
+
+        res = req.json()
+
+        session.keys.extend([Key(
+            kid=bytes.fromhex(x["key_id"]),
+            key_type=x.get("type", "CONTENT"),
+            key=bytes.fromhex(x["key"])
+        ) for x in res])
+
+        return True
+
+    def exchange(self, session, license_res, enc_key_id, hmac_key_id):
+        if isinstance(license_res, bytes):
+            license_res = base64.b64encode(license_res).decode()
+        if isinstance(enc_key_id, bytes):
+            enc_key_id = base64.b64encode(enc_key_id).decode()
+        if isinstance(hmac_key_id, bytes):
+            hmac_key_id = base64.b64encode(hmac_key_id).decode()
+        res = self.session("GetKeysX", {
+            "cdmkeyresponse": license_res,
+            "encryptionkeyid": enc_key_id,
+            "hmackeyid": hmac_key_id,
+            "session_id": self.api_session_id
+        })
+        return base64.b64decode(res["encryption_key"]), base64.b64decode(res["sign_key"])
+
+
+class CRDRemoteDevice(BaseDevice):
+    def __init__(self, *_, type, system_id, security_level, name, host, key, device=None, **__):
+        self.type = self.Types[type] if isinstance(type, str) else type
+        self.system_id = system_id
+        self.security_level = security_level
+        self.name = name
+        self.host = host
+        self.key = key
+        self.device = device
+
+        self.sessions = {}
+
+        self.api_session_id = None
+
+    def set_service_certificate(self, session, certificate):
+        if isinstance(certificate, bytes):
+            certificate = base64.b64encode(certificate).decode()
+
+        # certificate needs to be base64 to be sent off to the API.
+        # it needs to intentionally be kept as base64 encoded SignedMessage.
+
+        session.signed_device_certificate = certificate
+        session.privacy_mode = True
+
+        return True
+
+    def get_license_challenge(self, session):
+        pssh = session.pssh
+
+        req = requests.post(self.host + "/playready3000/get_challenge",
+            headers={
+                'Content-Type': 'application/json', 'X-Api-Key': self.key
+            },
+            json={
+                "pssh": pssh
+            },
+        )
+        if not req.ok:
+            raise ValueError(req.text)
+
+        res = req.json()
+        return base64.b64decode(res["challenge"])
+
+    def parse_license(self, session, license_res):
+        if isinstance(license_res, bytes):
+            license_res = base64.b64encode(license_res).decode()
+
+        req = requests.post(self.host + "/playready3000/get_keys",
+            headers={
+                'Content-Type': 'application/json', 'X-Api-Key': self.key
+            },
+            json={
+                "response": license_res
+            }
+        )
+        if not req.ok:
+            raise ValueError(req.text)
+
+        res = req.json()
+        session.keys.extend([Key(
+            kid=bytes.fromhex(x["kid"]),
+            key_type=x.get("type", "CONTENT"),
+            key=bytes.fromhex(x["key"])
+        ) for x in res])
+
+        return True
+
+    def exchange(self, session, license_res, enc_kid, hmac_kid):
+        if isinstance(license_res, bytes):
+            license_res = base64.b64encode(license_res).decode()
+        if isinstance(enc_kid, bytes):
+            enc_kid = base64.b64encode(enc_kid).decode()
+        if isinstance(hmac_kid, bytes):
+            hmac_kid = base64.b64encode(hmac_kid).decode()
+        res = self.session("GetKeysX", {
+            "cdmkeyresponse": license_res,
+            "encryptionkeyid": enc_kid,
+            "hmackeyid": hmac_key_id,
+            "session_id": self.api_session_id
+        })
+        return base64.b64decode(res["encryption_key"]), base64.b64decode(res["sign_key"])

@@ -37,53 +37,20 @@ class Directories:
 class Filenames:
     def __init__(self):
         self.log = os.path.join(directories.logs, "fuckdl_{time}.log")
-        # Support both fuckdl.yml and Fuck.yml (case-insensitive)
-        self.root_config = self._find_config_file(directories.configuration, ["fuckdl.yml", "Fuck.yml", "fuck.yml"])
-        self.user_root_config = self._find_config_file(directories.user_configs, ["fuckdl.yml", "Fuck.yml", "fuck.yml"])
+        self.root_config = os.path.join(directories.configuration, "fuckdl.yml")
+        self.user_root_config = os.path.join(directories.user_configs, "fuckdl.yml")
         self.service_config = os.path.join(directories.configuration, "services", "{service}.yml")
         self.user_service_config = os.path.join(directories.service_configs, "{service}.yml")
         self.subtitles = os.path.join(directories.temp, "TextTrack_{id}_{language_code}.srt")
         self.chapters = os.path.join(directories.temp, "{filename}_chapters.txt")
-    
-    @staticmethod
-    def _find_config_file(directory, possible_names):
-        """Find config file with case-insensitive matching."""
-        dir_path = Path(directory)
-        if not dir_path.exists():
-            # Return first option as default if directory doesn't exist
-            return os.path.join(directory, possible_names[0])
-        
-        # Check for exact matches first
-        for name in possible_names:
-            file_path = dir_path / name
-            if file_path.exists():
-                return str(file_path)
-        
-        # Case-insensitive search
-        for file_path in dir_path.iterdir():
-            if file_path.is_file():
-                file_lower = file_path.name.lower()
-                for name in possible_names:
-                    if file_lower == name.lower():
-                        return str(file_path)
-        
-        # Return default if not found
-        return os.path.join(directory, possible_names[0])
 
 
 directories = Directories()
 filenames = Filenames()
-
-# Load config files (handle case-insensitive file names)
-config = {}
-if os.path.exists(filenames.root_config):
-    with open(filenames.root_config) as fd:
-        config = yaml.safe_load(fd) or {}
-
-user_config = {}
-if os.path.exists(filenames.user_root_config):
-    with open(filenames.user_root_config) as fd:
-        user_config = yaml.safe_load(fd) or {}
+with open(filenames.root_config) as fd:
+    config = yaml.safe_load(fd)
+with open(filenames.user_root_config) as fd:
+    user_config = yaml.safe_load(fd)
 merge_dict(config, user_config)
 config = SimpleNamespace(**config)
 credentials = config.credentials
@@ -116,5 +83,6 @@ for service, aliases in SERVICE_MAP.items():
     for alias in aliases:
         config.arguments[alias] = config.arguments.get(service)
 config.arguments = CaseInsensitiveDict(config.arguments)
+
 
 

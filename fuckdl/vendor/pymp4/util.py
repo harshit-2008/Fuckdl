@@ -66,3 +66,4 @@ class BoxUtil(object):
             for sbox in box.children:
                 for fbox in cls.find_extended(sbox, extended_type_):
                     yield fbox
+

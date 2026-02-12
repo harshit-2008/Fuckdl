@@ -111,3 +111,4 @@ class WidevineSignatureReader(FromFileMixin):
     def get_tags(cls, filename):
         """Return a dictionary of each tag in the signature file"""
         return cls.from_file(filename).tags
+

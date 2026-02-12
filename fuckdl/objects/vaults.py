@@ -1,12 +1,18 @@
 import os
+import json
 import sqlite3
+import logging
+import traceback
 import requests
 from enum import Enum
-import logging
+
 import pymysql
 
 from fuckdl.utils.AtomicSQL import AtomicSQL
+from fuckdl.utils.collections import first_or_none
 
+
+log = logging.getLogger("Vaults")
 
 class InsertResult(Enum):
     FAILURE = 0
@@ -29,7 +35,6 @@ class Vault:
         username=None,
         password=None,
         database=None,
-        key=None,
         host=None,
         port=3306,
     ):
@@ -58,10 +63,10 @@ class Vault:
             )
         elif self.type == Vault.Types.HTTP:
             self.url = host
-            self.headers = {"decrypt-labs-api-key": key}
-            self.get_cached_keys_path = "/get-cached-keys"
-            self.insert_cached_keys_path = "/insert-cached-keys"
             self.username = username
+            self.password = password
+        elif self.type == Vault.Types.HTTPAPI:
+            self.url = host
             self.password = password
         else:
             raise ValueError(f"Invalid vault type [{self.type.name}]")
@@ -69,6 +74,7 @@ class Vault:
             self.Types.LOCAL: "?",
             self.Types.REMOTE: "%s",
             self.Types.HTTP: None,
+            self.Types.HTTPAPI: None,
         }[self.type]
         self.ticket = ticket
 
@@ -85,6 +91,8 @@ class Vault:
         if self.type == self.Types.LOCAL:
             return [tuple([["*"], tuple(["*", "*"])])]
         elif self.type == self.Types.HTTP:
+            return [tuple([["*"], tuple(["*", "*"])])]
+        elif self.type == self.Types.HTTPAPI:
             return [tuple([["*"], tuple(["*", "*"])])]
 
         with self.con.cursor() as c:
@@ -114,6 +122,7 @@ class Vault:
         LOCAL = 1
         REMOTE = 2
         HTTP = 3
+        HTTPAPI = 4
 
 
 class Vaults:
@@ -129,68 +138,84 @@ class Vaults:
 
     def __init__(self, vaults, service):
         self.adb = AtomicSQL()
+        self.api_session_id = None
         self.vaults = sorted(
-            vaults, key=lambda v: 0 if v.type == Vault.Types.LOCAL else 1
+            vaults, key=lambda v: 0 if v.type is Vault.Types.LOCAL else 1
         )
         self.service = service.lower()
         for vault in self.vaults:
-            if vault.type == Vault.Types.HTTP:
+            if vault.type is Vault.Types.HTTP or vault.type is Vault.Types.HTTPAPI:
                 continue
 
             vault.ticket = self.adb.load(vault.con)
             self.create_table(vault, self.service, commit=True)
-            
-        self.log = logging.getLogger("Vault")
+
+    def request(self, method, url, key, params=None):
+        r = requests.post(
+            url,
+            json={
+                "method": method,
+                "params": {
+                    **(params or {}),
+                    "session_id": self.api_session_id,
+                },
+                "token": key,
+            },
+        )
+
+        if not r.ok:
+            raise ValueError(f"API returned HTTP Error {r.status_code}: {r.reason.title()}")
+
+        try:
+            res = r.json()
+        except json.JSONDecodeError:
+            raise ValueError(f"API returned an invalid response: {r.text}")
+
+        if res.get("status_code") != 200:
+            raise ValueError(f"API returned an error: {res['status_code']} - {res['message']}")
+
+        if session_id := res["message"].get("session_id"):
+            self.api_session_id = session_id
+
+        return res["message"]
 
     def __iter__(self):
         return iter(self.vaults)
 
     def get(self, kid, title):
         for vault in self.vaults:
-            if vault.type == Vault.Types.HTTP:
-                if any(word in vault.name.lower() for word in ["decrypt labs", "decryptlabs", "zane"]):
-                    # for zane api. vault name should contain words like zane, decryptlabs, etc.
-                    try:
-                        response = requests.post(
-                            vault.url + vault.get_cached_keys_path,
-                            headers=vault.headers,
-                            json={
-                                "service": self.service,
-                                "kid": kid
-                            },
-                            timeout=30
-                        )
-                        response_dict = response.json()
-                        if response_dict.get("message") == "success":
-                            keys = response_dict.get("cached_keys", [])
-                            for key_result in keys:
-                                if key_result["kid"] == kid:
-                                    return key_result["key"], vault
-                    except requests.exceptions.Timeout:
-                        self.log.debug("Get cached keys timed out after 30s")
-                    except requests.exceptions.JSONDecodeError:
-                        self.log.debug(f"Get cached keys request returned an invalid non-JSON response: {response.text}")
-                    except requests.exceptions.RequestException as e:
-                        self.log.debug(f"Get cached keys request failed: {e}")
-                    except:
-                        pass
-                else:
-                    try:
-                        keys = requests.get(
-                            vault.url,
-                            params={
-                                "service": self.service,
-                                "username": vault.username,
-                                "password": vault.password,
-                                "kid": kid,
-                            },
-                            timeout=3
-                        ).json()
-                        
-                        if keys["keys"]:
-                            return keys["keys"][0]["key"], vault
-                    except:
-                        continue
+            if vault.type is Vault.Types.HTTP:
+                keys = requests.get(
+                    vault.url,
+                    params={
+                        "service": self.service,
+                        "username": vault.username,
+                        "password": vault.password,
+                        "kid": kid,
+                    },
+                ).json()
+
+                if keys["keys"]:
+                    return keys["keys"][0]["key"], vault
+            elif vault.type is Vault.Types.HTTPAPI:
+                try:
+                    keys = self.request(
+                        "GetKey",
+                        vault.url,
+                        vault.password,
+                        {
+                            "kid": kid,
+                            "service": self.service,
+                            "title": title,
+                        },
+                    ).get("keys", [])
+                    return first_or_none(x["key"] for x in keys if x["kid"] == kid), vault
+                except (Exception, SystemExit) as e:
+                    # TODO: We currently need to catch SystemExit because of log.exit, this should be refactored
+                    log.debug(traceback.format_exc())
+                    if not isinstance(e, SystemExit):
+                        log.error(f"Failed to get key ({e.__class__.__name__}: {e}")
+                    return None
             else:
                 # Note on why it matches by KID instead of PSSH:
                 # Matching cache by pssh is not efficient. The PSSH can be made differently by all different
@@ -304,11 +329,7 @@ class Vaults:
 
     def insert_key(self, vault, table, kid, key, title, commit=False):
         if vault.type == Vault.Types.HTTP:
-            if any(word in vault.name.lower() for word in ["decrypt labs", "decryptlabs", "zane"]):
-                return InsertResult.SUCCESS
-            else:
-                try:
-                    keys = requests.get(
+            keys = requests.get(
                         vault.url,
                         params={
                             "service": self.service,
@@ -318,51 +339,65 @@ class Vaults:
                             "key": key,
                             "title": title
                         },
-                        timeout=3
                     ).json()
-                    if keys["status_code"] == 200 and keys["inserted"]:
-                        return InsertResult.SUCCESS
-                    elif keys["status_code"] == 200:
-                        return InsertResult.ALREADY_EXISTS
-                    else:
-                        return InsertResult.FAILURE
-                except:
-                    return InsertResult.FAILURE
-        else:
-            if not self.table_exists(vault, table):
-                return InsertResult.FAILURE
-            if not vault.ticket:
-                raise ValueError(
-                    f"Vault {vault.name} does not have a valid ticket available."
-                )
-            if not vault.has_permission("INSERT", table=table):
-                raise ValueError(
-                    f"Cannot insert key into Vault. Vault {vault.name} has no INSERT permission."
-                )
-            if self.adb.safe_execute(
-                vault.ticket,
-                lambda db, cursor: cursor.execute(
-                    "SELECT `id` FROM `{1}` WHERE `kid`={0} AND `key_`={0}".format(
-                        vault.ph, self.service
-                    ),
-                    [kid, key],
-                ),
-            ).fetchone():
+            if keys["status_code"] == 200 and keys["inserted"]:
+                return InsertResult.SUCCESS
+            elif keys["status_code"] == 200:
                 return InsertResult.ALREADY_EXISTS
-            self.adb.safe_execute(
-                vault.ticket,
-                lambda db, cursor: cursor.execute(
-                    "INSERT INTO `{1}` (kid, key_, title) VALUES ({0}, {0}, {0})".format(
-                        vault.ph, table
-                    ),
-                    (kid, key, title),
-                ),
+            else:
+                return InsertResult.FAILURE
+        elif vault.type is Vault.Types.HTTPAPI:
+            res = self.request(
+                "InsertKey",
+                vault.url,
+                vault.password,
+                {
+                    "kid": kid,
+                    "key": key,
+                    "service": self.service,
+                    "title": title,
+                },
+            )["inserted"]
+            if res:
+                return InsertResult.SUCCESS
+       
+            else:
+                return InsertResult.FAILURE
+        if not self.table_exists(vault, table):
+            return InsertResult.FAILURE
+        if not vault.ticket:
+            raise ValueError(
+                f"Vault {vault.name} does not have a valid ticket available."
             )
-            if commit:
-                self.commit(vault)
-            return InsertResult.SUCCESS
+        if not vault.has_permission("INSERT", table=table):
+            raise ValueError(
+                f"Cannot insert key into Vault. Vault {vault.name} has no INSERT permission."
+            )
+        if self.adb.safe_execute(
+            vault.ticket,
+            lambda db, cursor: cursor.execute(
+                "SELECT `id` FROM `{1}` WHERE `kid`={0} AND `key_`={0}".format(
+                    vault.ph, self.service
+                ),
+                [kid, key],
+            ),
+        ).fetchone():
+            return InsertResult.ALREADY_EXISTS
+        self.adb.safe_execute(
+            vault.ticket,
+            lambda db, cursor: cursor.execute(
+                "INSERT INTO `{1}` (kid, key_, title) VALUES ({0}, {0}, {0})".format(
+                    vault.ph, table
+                ),
+                (kid, key, title),
+            ),
+        )
+        if commit:
+            self.commit(vault)
+        return InsertResult.SUCCESS
 
     def commit(self, vault):
-        if vault.type == Vault.Types.HTTP:
+        if vault.type == Vault.Types.HTTP or vault.type == Vault.Types.HTTPAPI:
             return
         self.adb.commit(vault.ticket)
+

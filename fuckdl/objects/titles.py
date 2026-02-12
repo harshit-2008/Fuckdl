@@ -46,7 +46,7 @@ class Title:
             # auto generated initial filename
             self.filename = self.parse_filename()
 
-    def parse_filename(self, media_info=None, folder=False, no_title=False):
+    def parse_filename(self, media_info=None, folder=False):
         from fuckdl.config import config
 
         if media_info:
@@ -125,8 +125,6 @@ class Title:
             if re.fullmatch(r"(?:Episode|Chapter|Capitulo|Folge) \d+", episode_name or ""):
                 episode_name = None
 
-            if no_title:
-                episode_name = None     
             filename = config.output_template["series"].format(
                 title=self.name,
                 season_episode=(f"S{self.season:02}"
@@ -208,3 +206,4 @@ class Titles(list):
         for title in self:
             if title.is_wanted(wanted):
                 yield title
+

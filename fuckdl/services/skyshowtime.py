@@ -33,9 +33,7 @@ class Skyshowtime(BaseService):
     
     TITLE_RE = [
         r"(?:https?://(?:www\.)?skyshowtime\.com/watch/asset)?(?P<id>/movies/[a-z0-9-]+/[a-f0-9-]+)",
-        r"(?:https?://(?:www\.)?skyshowtime\.com/watch/asset)?(?P<id>/movies/[a-z0-9.-]+/[a-f0-9-]+)",
         r"(?:https?://(?:www\.)?skyshowtime\.com/watch/asset)?(?P<id>/tv/[a-z0-9-]+/[a-f0-9-]+)",
-        r"(?:https?://(?:www\.)?skyshowtime\.com/watch/asset)?(?P<id>/tv/[a-z0-9.-]+/[a-f0-9-]+)",
     ]
 
     VIDEO_RANGE_MAP = {
@@ -255,7 +253,7 @@ class Skyshowtime(BaseService):
                 track.dolbyvison = True if supported_colour_spaces == ["DV"] else False
 
         for track in tracks:
-            track.needs_proxy = False
+            track.needs_proxy = True
 
         if self.acodec:
             tracks.audios = [
@@ -455,3 +453,4 @@ class Skyshowtime(BaseService):
         )
 
         return me.status_code == 200
+

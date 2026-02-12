@@ -49,12 +49,18 @@ class DisneyPlus(BaseService):
     @click.option("-s", "--scenario", default="tv-drm-cbcs", type=str,
                   help="Capability profile that specifies compatible codecs, streams, bit-rates, resolutions and such.")
     @click.option("--hulu", is_flag=True, default=False, help="Get Disney+ Hulu titles.")
+    @click.option("-extras", "extras", type=click.Choice(["all", "list"], case_sensitive=False), default=None, metavar="MODE",
+        help="Extras mode. Use: -extras all | -extras list")
+    @click.option("-versions", "versions", type=click.Choice(["all", "list"], case_sensitive=False), default=None, metavar="MODE",
+        help="Versions mode. Use: -versions all | -versions list")
     @click.pass_context
     def cli(ctx, **kwargs):
         return DisneyPlus(ctx, **kwargs)
 
-    def __init__(self, ctx, title, movie, scenario, hulu):
+    def __init__(self, ctx, title, movie, scenario, hulu, extras=None, versions=None):
         super().__init__(ctx)
+        self.extras = extras
+        self.versions = versions
         m = self.parse_title(ctx, title)
         self.movie = movie or m.get("type") == "movies"
         self.scenario = scenario
@@ -70,11 +76,11 @@ class DisneyPlus(BaseService):
         self.bamsdk = None
         self.device_token = None
         self.account_tokens = {}
-
+        
         self.configure()
 
     def get_titles(self):
-        if  not "entity" in self.title:
+        if "entity" not in self.title:
             deeplinkId = self.session.get(
                 url='https://disney.api.edge.bamgrid.com/explore/v1.6/deeplink',
                 params = {
@@ -100,62 +106,258 @@ class DisneyPlus(BaseService):
             self.log.exit(f" - {errors}")
 
         self.hulu = title_metadata["data"]["page"]["visuals"].get("serviceAttribution", "").lower() == "included with your hulu subscription" or self.hulu_
-        
+
+        title_data = title_metadata["data"].get("page", {})
+
+        # ============================================================
+        # CASE: -extras list / -extras all
+        # ============================================================
+        if self.extras in ("list", "all"):
+            extras = []
+            for container in title_data.get("containers", []):
+                ctype = container.get("type")
+                cname = container.get("visuals", {}).get("name", "").upper()
+
+                if ctype == "set" and cname == "EXTRAS":
+                    if self.extras == "all":
+                        self.log.info("=== EXTRAS ===")
+
+                    for item in container.get("items", []):
+                        visuals = item.get("visuals", {})
+                        actions = item.get("actions", [])
+
+                        title_txt = (visuals.get("title") or "").strip()
+                        subtitle = (visuals.get("subTitle") or "").strip()
+
+                        is_preview = item.get("isPreview") is True
+                        content_class = (item.get("contentClass") or "").lower()
+
+                        title_lower = title_txt.lower()
+                        subtitle_lower = subtitle.lower()
+
+                        # Heurística anti-trailer
+                        if (
+                            title_lower.startswith("tráiler")
+                            or title_lower.startswith("trailer")
+                            or "tráiler" in subtitle_lower
+                            or "trailer" in subtitle_lower
+                            or is_preview
+                            or content_class in {"trailer", "preview"}
+                        ):
+                            if self.extras == "all":
+                                self.log.info(f"  [SKIP TRAILER] {title_txt}")
+                            continue
+
+                        resourceId = actions[0]["resourceId"] if actions else None
+                        if not resourceId:
+                            if self.extras == "all":
+                                self.log.info(f"  [SKIP NO RESOURCE] {title_txt}")
+                            continue
+
+                        extras.append(
+                            Title(
+                                id_=item.get("id"),
+                                type_=Title.Types.TV,
+                                name=title_txt,
+                                source=self.ALIASES[0],
+                                service_data={
+                                    "is_extra": True,
+                                    "resourceId": resourceId,
+                                    **item
+                                }
+                            )
+                        )
+
+                        if self.extras == "all":
+                            self.log.info(f"  [EXTRA] {title_txt}")
+
+            if not extras:
+                self.log.info("No extras found.")
+                raise SystemExit(0)
+
+            # ----------------------------------
+            # Interactive selection -extras list
+            # ----------------------------------
+            if self.extras == "list":
+                self.log.info("=== EXTRAS ===")
+                for idx, extra in enumerate(extras, start=1):
+                    self.log.info(f"[{idx}] {extra.name}")
+
+                selection = click.prompt(
+                    "Enter the number of the extras that you want "
+                    "(eg: 1 or 1,3,4 — Press Enter to cancel)",
+                    default="",
+                    show_default=False
+                ).strip()
+
+                if not selection:
+                    self.log.info("Cancelled")
+                    raise SystemExit(0)
+
+                indices = {
+                    int(x)
+                    for x in re.split(r"[,\s]+", selection)
+                    if x.isdigit()
+                }
+
+                selected_extras = [
+                    e for i, e in enumerate(extras, start=1)
+                    if i in indices
+                ]
+
+                if not selected_extras:
+                    self.log.info("No valid extras selected.")
+                    raise SystemExit(0)
+
+                return selected_extras
+
+            # ----------------------------
+            # -extras all
+            # ----------------------------
+            return extras
+
+        # ============================================================
+        # CASE: -versions list / -versions all
+        # ============================================================
+        if self.versions in ("list", "all"):
+            versions = []
+            for container in title_data.get("containers", []):
+                ctype = container.get("type")
+                cname = (container.get("visuals", {}).get("name") or "").upper()
+
+                if ctype == "set" and cname in ("VERSIONS", "VERSIONES"):
+                    if self.versions == "all":
+                        self.log.info("=== VERSIONS ===")
+
+                    for item in container.get("items", []):
+                        title_txt = (
+                            item.get("visuals", {}).get("title")
+                            or item.get("visuals", {}).get("name")
+                        )
+                        actions = item.get("actions", [])
+                        resourceId = actions[0]["resourceId"] if actions else None
+
+                        if not resourceId:
+                            continue
+
+                        versions.append(
+                            Title(
+                                id_=item.get("id"),
+                                type_=Title.Types.MOVIE,
+                                name=title_txt,
+                                source=self.ALIASES[0],
+                                service_data={
+                                    "is_version": True,
+                                    "resourceId": resourceId,
+                                    **item
+                                }
+                            )
+                        )
+
+                        if self.versions == "all":
+                            self.log.info(f"  [VERSION] {title_txt}")
+
+            if not versions:
+                self.log.info("No versions found.")
+                raise SystemExit(0)
+
+            # ------------------------------------
+            # Interactive selection -versions list
+            # ------------------------------------
+            if self.versions == "list":
+                self.log.info("=== VERSIONS ===")
+                for idx, version in enumerate(versions, start=1):
+                    self.log.info(f"[{idx}] {version.name}")
+
+                selection = click.prompt(
+                    "Enter the number of the versions that you want "
+                    "(eg: 1 or 1,3,4 — Press Enter to cancel)",
+                    default="",
+                    show_default=False
+                ).strip()
+
+                if not selection:
+                    self.log.info("Cancelled")
+                    raise SystemExit(0)
+
+                indices = {
+                    int(x)
+                    for x in re.split(r"[,\s]+", selection)
+                    if x.isdigit()
+                }
+
+                selected_versions = [
+                    v for i, v in enumerate(versions, start=1)
+                    if i in indices
+                ]
+
+                if not selected_versions:
+                    self.log.info("No valid versions selected.")
+                    raise SystemExit(0)
+
+                return selected_versions
+
+            # ----------------------------
+            # -versions all
+            # ----------------------------
+            return versions
+
+        # ============================================================
+        # CASE: Movie
+        # ============================================================
         if self.movie:
-            title = title_metadata["data"]["page"]
+            title = title_data
             if "imax_enhanced" in str(title):
                 imax = "IMAX"
             else:
                 imax = ""
-
-            #print(title_metadata['data']['page']['actions'][0]['resourceId'])
             availId = title["actions"][0]["availId"]
             original_lang = self.get_original_lang(availId)
             return Title(
                 id_=self.title,
                 type_=Title.Types.MOVIE,
                 name = title['actions'][0]['internalTitle'].split(" - movie")[0],
-                #name=title['visuals']['title'],
-                #year=title['visuals']['metastringParts']['releaseYearRange']['startYear'],
                 year=title['visuals']['metastringParts'].get('releaseYearRange', {}).get('startYear'),
                 source=self.ALIASES[0],
                 original_lang=original_lang,
-                service_data={'resourceId': title_metadata['data']['page']['actions'][0]['resourceId'], 'imax': imax},
+                service_data={'resourceId': title_data['actions'][0]['resourceId'], 'imax': imax},
             )
+
+        # ============================================================
+        # CASE: Series
+        # ============================================================
         else:
-            title = title_metadata["data"].get("page")
+            title = title_data
             season_len = len(title["containers"][0]["seasons"])
             if title["containers"][0].get("type") == "episodes":
                 if season_len == 0:
                     raise self.log.exit(" - No seasons available")
             seasons = list()
-            for x, season in enumerate(
-                reversed(title["containers"][0]["seasons"]), start=1
-            ):
+            for season in reversed(title["containers"][0]["seasons"]):
                 season_metadata = self.session.get(
                     url=f'https://disney.api.edge.bamgrid.com/explore/v1.6/season/{season["id"]}',
                     params={'limit': 999},
                 ).json()["data"]["season"]["items"]
-                formatted_season_metadata = json.dumps(season_metadata, indent=4)
-                #print(formatted_season_metadata)
+
                 availId = season_metadata[0]["actions"][0]["availId"]
                 original_lang = self.get_original_lang(availId)
-                seasons += [Title(
-                    id_=self.title,
-                    type_=Title.Types.TV,
-                    name=episode['visuals']['title'],
-                    #season=episode['visuals']['seasonNumber'],
-                    season=99 if int(episode['visuals']['seasonNumber']) < 0 else episode["visuals"].get("seasonNumber"),
-                    episode=episode['visuals']['episodeNumber'],
-                    episode_name=episode['visuals']['episodeTitle'],
-                    source=self.ALIASES[0],
-                    original_lang=original_lang,
-                    service_data=episode,
+
+                seasons += [
+                    Title(
+                        id_=self.title,
+                        type_=Title.Types.TV,
+                        name=episode['visuals']['title'],
+                        season=episode['visuals']['seasonNumber'],
+                        episode=episode['visuals']['episodeNumber'],
+                        episode_name=episode['visuals']['episodeTitle'],
+                        source=self.ALIASES[0],
+                        original_lang=original_lang,
+                        service_data=episode,
                     )
                     for episode in season_metadata
                 ]
+
             for x in seasons:
-                x.service_data["resourceId"] = {}
                 x.service_data["resourceId"] = x.service_data["actions"][0]["resourceId"]
 
             return seasons
@@ -229,7 +431,7 @@ class DisneyPlus(BaseService):
 
         for track in tracks:
             if isinstance(track, AudioTrack):
-                track.encrypted = True if self.hulu else False
+                track.encrypted = True if self.hulu_ else False
             if isinstance(track, VideoTrack):
                 track.encrypted = True
 

@@ -1,3 +1,4 @@
+import urllib3
 import os
 import re
 from copy import copy
@@ -18,8 +19,13 @@ for service in os.listdir(os.path.dirname(__file__)):
     with open(os.path.join(os.path.dirname(__file__), f"{service}.py"), encoding="utf-8") as fd:
         code = ""
         for line in fd.readlines():
-            if re.match(r"\s*(?:import(?! click)|from)\s", line):
+            # Fix applied here: Instead of just skipping imports, we replace them with 'pass'.
+            # This keeps the indentation valid if the import was inside a try/except block.
+            match = re.match(r"(\s*)(?:import(?! click)|from)\s", line)
+            if match:
+                code += match.group(1) + "pass\n"
                 continue
+
             code += line
             if re.match(r"\s*super\(\)\.__init__\(", line):
                 break

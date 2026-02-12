@@ -4,7 +4,7 @@ import argparse
 import json
 import sqlite3
 
-from fuckdl.utils.AtomicSQL import AtomicSQL
+from vinetrimmer.utils.AtomicSQL import AtomicSQL
 
 
 class LocalVault:

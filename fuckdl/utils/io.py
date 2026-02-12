@@ -11,11 +11,12 @@ import requests
 import yaml
 import tqdm
 import logging
+import time
 from fuckdl import config
 from fuckdl.utils.collections import as_list
 from pathlib import Path
-import m3u8
-from fuckdl.utils.downloaders import n_m3u8dl, aria2
+from typing import Union  # <-- AGREGAR ESTA IMPORTACIÓN
+
 
 def load_yaml(path):
     if not os.path.isfile(path):
@@ -23,6 +24,21 @@ def load_yaml(path):
     with open(path) as fd:
         return yaml.safe_load(fd)
 
+def save_yaml(data: dict, path: Union[str, Path]) -> None:
+    """
+    Save data to a YAML file.
+    
+    Args:
+        data: Data to save
+        path: Path to save to
+    """
+    import yaml
+    
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(path, 'w', encoding='utf-8') as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 _ip_info = None
 
@@ -94,7 +110,223 @@ def download_range(url, count, start=0, proxy=None):
     return buffer
 
 
-async def aria2c(uri, track, source, out, headers=None, proxy=None):
+# HBO Max specific constants
+HBOMAX_ALIASES = ["HBOMAX", "hbomax", "HBO Max", "hbo max", "MAX", "max"]
+HBOMAX_URL_PATTERNS = [
+    "dfw-nbl.latam.prd.media.max.com",
+    "hbomax.com", 
+    "max.com",
+    "hbo.com",
+    ".max.com/gcs/",
+    "media.max.com"
+]
+
+# HBO Max predefined headers (from working command)
+HBOMAX_PREDEFINED_HEADERS = {
+    "User-Agent": "BEAM-Android/5.0.0 (motorola/moto g(6) play)",
+    "Accept": "application/json, text/plain, */*",
+    "Connection": "keep-alive",
+    "Content-Type": "application/json",
+    "x-disco-client": "ANDROID:9:beam:5.0.0",
+    "x-disco-params": "realm=bolt,bid=beam,features=ar,rr",
+    "x-device-info": "BEAM-Android/5.0.0 (motorola/moto g(6) play; ANDROID/9; 9cac27069847250f/b6746ddc-7bc7-471f-a16c-f6aaf0c34d26)",
+    "Origin": "https://play.hbomax.com",
+    "Referer": "https://play.hbomax.com/"
+}
+
+def is_hbomax_url(url):
+    """Check if URL belongs to HBO Max service."""
+    url_str = str(url).lower()
+    return any(pattern.lower() in url_str for pattern in HBOMAX_URL_PATTERNS)
+
+
+def is_hbomax_alias(service_name):
+    """Check if service name is an HBO Max alias."""
+    return any(alias.lower() == service_name.lower() for alias in HBOMAX_ALIASES)
+
+
+def are_hbomax_headers_expired(headers):
+    """Check if HBO Max headers have expired tokens."""
+    if not headers:
+        return False
+    
+    headers_str = str(headers)
+    
+    # Check for tracestate with expires field
+    if "tracestate" in headers_str and "expires" in headers_str:
+        import re
+        match = re.search(r"'expires':\s*(\d+)", headers_str)
+        if match:
+            expires_timestamp = int(match.group(1)) / 1000  # Convert to seconds
+            current_time = time.time()
+            return current_time > expires_timestamp
+    
+    return False
+
+
+def get_hbomax_predefined_headers():
+    """Get predefined headers for HBO Max with updated expiration."""
+    headers = HBOMAX_PREDEFINED_HEADERS.copy()
+    
+    # Update expiration timestamp (24 hours from now)
+    current_time_ms = int(time.time() * 1000)
+    expires_time_ms = current_time_ms + (24 * 60 * 60 * 1000)  # 24 hours
+    
+    # Update tracestate with new expiration
+    old_tracestate = headers.get("tracestate", "")
+    if "'expires':" in old_tracestate:
+        # Replace the expiration timestamp
+        import re
+        new_tracestate = re.sub(
+            r"'expires':\s*\d+",
+            f"'expires': {expires_time_ms}",
+            old_tracestate
+        )
+        headers["tracestate"] = new_tracestate
+    
+    return headers
+
+async def aria2c_hbomax_specific(uri, out, proxy=None):
+    """Specialized aria2c download for HBO Max with fresh headers."""
+    executable = "C:\\DRMLab\\binaries\\aria2c.EXE"
+    if not os.path.isfile(executable):
+        executable = shutil.which("aria2c") or shutil.which("aria2")
+        if not executable:
+            raise EnvironmentError("Aria2c executable not found...")
+
+    arguments = [
+        executable,
+        "-c", "--remote-time",
+        "-o", os.path.basename(out),
+        "-x", "8", "-j", "8", "-s", "8",
+        "--allow-overwrite=true",
+        "--auto-file-renaming=false",
+        "--retry-wait", "3",
+        "--max-tries", "10",
+        "--max-file-not-found", "5",
+        "--summary-interval", "1",  # Mostrar progreso cada 1 segundo
+        "--file-allocation", "none" if sys.platform == "win32" else "falloc",
+        "--console-log-level", "info",  # Cambiado a "info" para ver progreso
+        "--download-result", "default",
+        "--file-allocation=prealloc",
+        "--human-readable=true",
+        "--quiet=false",
+        "--show-console-readout=true",
+        "--check-certificate=false",
+        "--timeout=30",
+        "--connect-timeout=30"
+    ]
+
+    # Obtener headers frescos con trace dinámicos
+    hbomax_headers = get_hbomax_predefined_headers()
+    
+    for header, value in hbomax_headers.items():
+        arguments.extend(["--header", f"{header}: {value}"])
+
+    if proxy:
+        arguments.extend(["--all-proxy", proxy])
+
+    arguments.extend(["-d", os.path.dirname(out), uri])
+
+    try:
+        print(f"HBO Max - Downloading: {os.path.basename(out)}")
+        
+        process = subprocess.Popen(
+            arguments,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Combinar stdout y stderr
+            universal_newlines=True,
+            bufsize=1,
+            encoding='utf-8',
+            errors='ignore',
+            text=True
+        )
+        
+        last_percentage = 0
+        file_size_mb = 0
+        download_speed = ""
+        eta = ""
+        
+        # Procesar salida en tiempo real
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                if process.poll() is not None:
+                    break
+                continue
+            
+            # Filtrar y mostrar solo líneas de progreso
+            line = line.strip()
+            
+            # Detectar líneas de progreso (varios formatos posibles)
+            if any(x in line for x in ["%", "CN:", "DL:", "ETA:", "Downloading"]):
+                # Extraer información relevante
+                import re
+                
+                # Buscar porcentaje: (XX%)
+                percent_match = re.search(r'\((\d+)%\)', line)
+                if percent_match:
+                    current_percentage = int(percent_match.group(1))
+                    if current_percentage != last_percentage:
+                        last_percentage = current_percentage
+                
+                # Buscar tamaño del archivo
+                size_match = re.search(r'(\d+\.?\d*[KMGT]?i?B)\/(\d+\.?\d*[KMGT]?i?B)', line)
+                if size_match:
+                    downloaded = size_match.group(1)
+                    total = size_match.group(2)
+                
+                # Buscar velocidad
+                speed_match = re.search(r'DL:(\s*\d+\.?\d*[KMGT]?i?B/s)', line)
+                if speed_match:
+                    download_speed = speed_match.group(1).strip()
+                
+                # Buscar ETA
+                eta_match = re.search(r'ETA:(\s*[\dhms]+)', line)
+                if eta_match:
+                    eta = eta_match.group(1).strip()
+                
+                # Construir línea de progreso bonita
+                progress_line = ""
+                if 'total' in locals():
+                    progress_line += f"{downloaded}/{total} "
+                
+                progress_line += f"({last_percentage}%) "
+                
+                if download_speed:
+                    progress_line += f"| Speed: {download_speed} "
+                
+                if eta:
+                    progress_line += f"| ETA: {eta}"
+                
+                # Mostrar progreso (sobrescribir la misma línea)
+                if progress_line:
+                    print(f"\r{progress_line}", end="", flush=True)
+            
+            # Mostrar errores importantes
+            elif any(x in line.lower() for x in ["error", "failed", "exception"]):
+                print(f"\n⚠️  {line}")
+        
+        # Limpiar línea y mostrar resultado final
+        print()  # Nueva línea
+        
+        # Verificar resultado
+        if process.returncode == 0:
+            if os.path.exists(out) and os.path.getsize(out) > 1024:
+                print(f"✓ Download completed: {os.path.basename(out)}")
+                return True
+            else:
+                print(f"⚠️  Download completed but file may be empty")
+                return False
+        else:
+            print(f"\n✗ Download failed (exit code: {process.returncode})")
+            return False
+        
+    except Exception as e:
+        print(f"\n✗ Error: {str(e)[:100]}")
+        return False
+
+async def aria2c(uri, out, headers=None, proxy=None):
     """
     Downloads file(s) using Aria2(c).
 
@@ -105,18 +337,59 @@ async def aria2c(uri, track, source, out, headers=None, proxy=None):
         headers: Headers to apply on aria2c.
         proxy: Proxy to apply on aria2c.
     """
+    # Check if this is HBO Max
+    if is_hbomax_url(uri):
+        # Check if headers are provided and if they're expired
+        if not headers or are_hbomax_headers_expired(headers):
+            print("HBO Max detected with no valid headers, using predefined headers...")
+            return await aria2c_hbomax_specific(uri, out, proxy)
+        else:
+            print("HBO Max detected with valid headers, proceeding with provided headers...")
 
+    # Continue with normal aria2c for non-HBO Max or HBO Max with valid headers
     executable = shutil.which("aria2c") or shutil.which("aria2")
     if not executable:
         raise EnvironmentError("Aria2c executable not found...")
 
-    arguments = []
+    arguments = [
+        executable,
+        "-c",  # Continue downloading a partially downloaded file
+        "--remote-time",  # Retrieve timestamp of the remote file from the and apply if available
+        "-o", os.path.basename(out),  # The file name of the downloaded file, relative to -d
+        "-x", "16",  # The maximum number of connections to one server for each download
+        "-j", "16",  # The maximum number of parallel downloads for every static (HTTP/FTP) URL
+        "-s", "16",  # Download a file using N connections.
+        "--allow-overwrite=true",
+        "--auto-file-renaming=false",
+        "--retry-wait", "5",  # Set the seconds to wait between retries.
+        "--max-tries", "15",
+        "--max-file-not-found", "15",
+        "--summary-interval", "0",
+        "--file-allocation", "none" if sys.platform == "win32" else "falloc",
+        "--console-log-level", "warn",
+        "--download-result", "hide"
+    ]
 
     for option, value in config.config.aria2c.items():
         arguments.append(f"--{option.replace('_', '-')}={value}")
-    
+
+    for header, value in (headers or {}).items():
+        if header.lower() == "accept-encoding":
+            # we cannot set an allowed encoding, or it will return compressed
+            # and the code is not set up to uncompress the data
+            continue
+        arguments.extend(["--header", f"{header}: {value}"])
+
     segmented = isinstance(uri, list)
     segments_dir = f"{out}_segments"
+
+    if segmented:
+        uri = "\n".join([
+            f"{url}\n"
+            f"\tdir={segments_dir}\n"
+            f"\tout={i:08}.mp4"
+            for i, url in enumerate(uri)
+        ])
 
     if proxy:
         arguments.append("--all-proxy")
@@ -135,72 +408,45 @@ async def aria2c(uri, track, source, out, headers=None, proxy=None):
         else:
             arguments.append(proxy)
 
-    for header, value in (headers or {}).items():
-        if header.lower() == "accept-encoding":
-            # we cannot set an allowed encoding, or it will return compressed
-            # and the code is not set up to uncompress the data
-            continue
-        arguments.extend(["--header", f"{header}: {value}"])
+    try:
+        if segmented:
+            subprocess.run(
+                arguments + ["-d", segments_dir, "-i-"],
+                input=as_list(uri)[0],
+                encoding="utf-8",
+                check=True
+            )
+        else:
+            subprocess.run(
+                arguments + ["-d", os.path.dirname(out), uri],
+                check=True
+            )
+    except subprocess.CalledProcessError:
+        raise ValueError("Aria2c failed too many times, aborting")
 
-    aria2(uri=uri, arg=arguments, track=track, source=source, out=out, headers=headers, proxy=proxy)
+    if segmented:
+        # merge the segments together
+        with open(out, "wb") as ofd:
+            for file in sorted(os.listdir(segments_dir)):
+                file = os.path.join(segments_dir, file)
+                with open(file, "rb") as ifd:
+                    data = ifd.read()
+                # Apple TV+ needs this done to fix audio decryption
+                data = re.sub(b"(tfhd\x00\x02\x00\x1a\x00\x00\x00\x01\x00\x00\x00)\x02", b"\\g<1>\x01", data)
+                ofd.write(data)
+                os.unlink(file)
+        os.rmdir(segments_dir)
+
     print()
 
 
-async def saldl(uri, track, source, out, headers=None, proxy=None):
+async def saldl(uri, out, headers=None, proxy=None):
     if headers:
         headers.update({k: v for k, v in headers.items() if k.lower() != "accept-encoding"})
 
     executable = shutil.which("saldl") or shutil.which("saldl-win64") or shutil.which("saldl-win32")
     if not executable:
         raise EnvironmentError("Saldl executable not found...")
-    
-    if track.descriptor == track.descriptor.M3U:
-            master = m3u8.loads(
-                requests.get(
-                    as_list(uri)[0],
-                    headers=headers,
-                    proxies=proxy if proxy is not None else {}
-                ).text,
-                uri=as_list(uri)[0]
-            )
-
-            durations = []
-            duration = 0
-            for segment in master.segments:
-                if segment.discontinuity:
-                    durations.append(duration)
-                    duration = 0
-                duration += segment.duration
-            durations.append(duration)
-            largest_continuity = durations.index(max(durations))
-
-            discontinuity = 0
-            has_init = False
-            segments = []
-            for segment in master.segments:
-                if segment.discontinuity:
-                    discontinuity += 1
-                    has_init = False
-                if source in ["DSNP", "STRP"] and re.search(
-                    r"[a-zA-Z0-9]{4}-(BUMPER|DUB_CARD)/",
-                    segment.uri + (segment.init_section.uri if segment.init_section else '')
-                ):
-                    continue
-                if source == "ATVP" and discontinuity != largest_continuity:
-                    # the amount of pre and post-roll sections change all the time
-                    # only way to know which section to get is by getting the largest
-                    continue
-                if segment.init_section and not has_init:
-                    segments.append(
-                        ("" if re.match("^https?://", segment.init_section.uri) else segment.init_section.base_uri) +
-                        segment.init_section.uri
-                    )
-                    has_init = True
-                segments.append(
-                    ("" if re.match("^https?://", segment.uri) else segment.base_uri) +
-                    segment.uri
-                )
-            uri = segments
 
     arguments = [
         executable,
@@ -231,39 +477,6 @@ async def saldl(uri, track, source, out, headers=None, proxy=None):
         subprocess.run(arguments, check=True)
     except subprocess.CalledProcessError:
         raise ValueError("Saldl failed too many times, aborting")
-
-    print()
-
-async def m3u8dl(uri, track, out, headers=None, proxy=None):
-    out = Path(out)
-
-    if track.descriptor == track.descriptor.M3U and isinstance(uri, list):
-        url = uri[0]
-    else:
-        url = uri
-
-    if headers:
-        headers.update({k: v for k, v in headers.items() if k.lower() != "accept-encoding"})
-
-    executable = shutil.which("m3u8re") or shutil.which("N_m3u8DL-RE")
-    if not executable:
-        raise EnvironmentError("N_m3u8DL-RE executable not found...")
-
-    if isinstance(uri, list):
-        raise ValueError("N_m3u8DL code does not yet support multiple uri (e.g. segmented) downloads.")
-    
-    else:
-        n_m3u8dl(str(url), track, str(out.parent), out.name.replace('.mp4','').replace('.vtt',''), headers, proxy)
-    
-    for filename in os.listdir(os.path.dirname(out)):
-        if filename == out.name.replace('.mp4','.m4a'):
-            os.rename(str(out).replace(".mp4", ".m4a"), out)
-        if filename == out.name.replace(".mp4", ".ts"):
-            os.rename(str(out).replace(".mp4", ".ts"), out)
-        if filename == out.name.replace(".mp4", ".srt"):
-            os.rename(str(out).replace(".mp4", ".srt"), out)
-        if filename == out.name.replace(".mp4", ".vtt"):
-            os.rename(str(out).replace(".mp4", ".vtt"), out)
 
     print()
     
@@ -308,6 +521,7 @@ async def m3u8re(uri, out, headers=None, proxy=None):
         "--save-name", out.name.replace('.mp4','').replace('.vtt','').replace('.m4a',''),
         "--auto-subtitle-fix", "False",
         "--thread-count", "32",
+        "--download-retry-count", "100",
         "--log-level", "INFO"
     ]
 
@@ -325,5 +539,4 @@ async def m3u8re(uri, out, headers=None, proxy=None):
     except subprocess.CalledProcessError:
         raise ValueError("N_m3u8DL-RE failed too many times, aborting")
 
-    print()    
-
+    print()

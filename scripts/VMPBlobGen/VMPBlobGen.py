@@ -4,8 +4,8 @@ import os
 import sys
 from hashlib import sha512
 
-from fuckdl.utils.widevine.protos.widevine_pb2 import FileHashes
-from fuckdl.utils.widevine.vmp import WidevineSignatureReader
+from vinetrimmer.utils.widevine.protos.widevine_pb2 import FileHashes
+from vinetrimmer.utils.widevine.vmp import WidevineSignatureReader
 
 """
 Script that generates a VMP blob for chromecdm

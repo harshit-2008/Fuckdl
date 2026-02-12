@@ -9,13 +9,12 @@ from urllib.parse import unquote
 from click import Context
 import click
 import m3u8
-from datetime import datetime, timedelta
+from datetime import datetime
 from fuckdl.objects import AudioTrack, TextTrack, Title, Tracks, VideoTrack, MenuTrack
 from fuckdl.services.BaseService import BaseService
 from fuckdl.vendor.pymp4.parser import Box
 import plistlib
 from fuckdl.utils.widevine.device import LocalDevice
-
 
 class iTunes(BaseService):
     """
@@ -45,19 +44,16 @@ class iTunes(BaseService):
     @click.option("-m", "--movie", is_flag=True, default=False, help="Title is a Movie.")
     @click.option("-ca", "--checkall", is_flag=True, default=False, help="Check all storefront manifests for additional audios and subs.")
     @click.option("-sf", "--storefront", type=int, default=None, help="Override storefront int if needed.")
-    @click.option("--master", type=str, default=None, help="Use the master hls url to downlaod.")
     @click.pass_context
     def cli(ctx, **kwargs):
         return iTunes(ctx, **kwargs)
 
-    def __init__(self, ctx, title: str, movie, checkall, storefront: bool, master):
+    def __init__(self, ctx, title: str, movie, checkall, storefront: bool):
         super().__init__(ctx)
         self.parse_title(ctx, title)
 
         self.vcodec = ctx.parent.params["vcodec"]
         self.acodec = ctx.parent.params["acodec"]
-        self.range = ctx.parent.params.get("range_")
-        self.quality = ctx.parent.params.get("quality")
         self.cdm = ctx.obj.cdm
         self.profile = ctx.obj.profile
 
@@ -67,14 +63,6 @@ class iTunes(BaseService):
         self.movie = movie
         self.checkall = checkall
         self.storefront = storefront
-        self.master_url = master
-        if self.quality == 2160 and self.vcodec != "H265":
-            self.log.info(" + Switched video codec to H265 to be able to get 2160p video track")
-            self.vcodec = "H265"
-        
-        if self.range in ("HDR10", "DV", "DVHDR", "HDRDV", "HYBRID") and self.vcodec != "H265":
-            self.log.info(f" + Switched video codec to H265 to be able to get {self.range} dynamic range")
-            self.vcodec = "H265"         
         self.configure()
 
     def get_titles(self):
@@ -105,7 +93,7 @@ class iTunes(BaseService):
                 id_=self.title,
                 type_=Title.Types.MOVIE,
                 name=information['title'],
-                year=(datetime(1970, 1, 1) + timedelta(milliseconds=information['releaseDate'])).strftime('%Y'),
+                #year=datetime.fromtimestamp(information['releaseDate'] / 1000).strftime('%Y'),
                 # TODO: Find a way to get year
                 original_lang="en",  # TODO: Don't assume
                 source=self.ALIASES[0],
@@ -145,31 +133,18 @@ class iTunes(BaseService):
             }
         ).json()
         stream_data = res
-        if self.master_url:
-            master_hls_url = self.master_url
-        else:
-            if self.vcodec == "H264":
-                try:
-                    master_hls_url = stream_data['data']['content']['playables'][0]['itunesMediaApiData']['offers'][0][
-                        'hlsUrl'] if self.quality == "SD" else stream_data['data']['content']['playables'][0]['itunesMediaApiData']['offers'][0][
-                        'hlsUrl'].replace("SD", "HD")
-                except:
-                    master_hls_url = stream_data['data']['content']['playables'][1]['itunesMediaApiData']['offers'][0][
-                        'hlsUrl'] if self.quality == "SD" else stream_data['data']['content']['playables'][0]['itunesMediaApiData']['offers'][0][
-                        'hlsUrl'].replace("SD", "HD")
-            else:
-                try:
-                    master_hls_url = stream_data['data']['content']['playables'][0]['itunesMediaApiData']['offers'][0][
-                        'hlsUrl'].replace("SD", "UHD").replace("HD", "UHD").replace("UUHD", "UHD")
-                except:
-                    master_hls_url = stream_data['data']['content']['playables'][1]['itunesMediaApiData']['offers'][0][
-                        'hlsUrl'].replace("SD", "UHD").replace("HD", "UHD").replace("UUHD", "UHD")
+        try:
+            master_hls_url = stream_data['data']['content']['playables'][0]['itunesMediaApiData']['offers'][0][
+                'hlsUrl'].replace("SD", "UHD").replace("HD", "UHD").replace("UUHD", "UHD")
+        except:
+            master_hls_url = stream_data['data']['content']['playables'][1]['itunesMediaApiData']['offers'][0][
+                'hlsUrl'].replace("SD", "UHD").replace("HD", "UHD").replace("UUHD", "UHD")
         r = self.session.get(master_hls_url)
         if not r.ok:
             self.log.exit(f" - HTTP Error {r.status_code}: {r.reason}")
             raise
 
-        master_hls_manifest = r.text.replace("streamPlaylist.m3u8","https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/streamPlaylist.m3u8")
+        master_hls_manifest = r.text
         master_playlist = m3u8.loads(master_hls_manifest, master_hls_url)
         if 'chapter' in master_hls_manifest:
             chapterLink = master_hls_manifest.rsplit('chapters.plist"', 1)[0].rsplit(',URI="', 1)[1] + 'chapters.plist'
@@ -218,8 +193,7 @@ class iTunes(BaseService):
                     if not r.ok:
                         continue
 
-                    
-                    master_hls_manifest = r.text.replace("streamPlaylist.m3u8","https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/streamPlaylist.m3u8")
+                    master_hls_manifest = r.text
                     master_playlist = m3u8.loads(master_hls_manifest, master_hls_url)
                     if 'chapter' in master_hls_manifest:
                         chapterLink = master_hls_manifest.rsplit('chapters.plist"', 1)[0].rsplit(',URI="', 1)[1] + 'chapters.plist'
@@ -244,9 +218,6 @@ class iTunes(BaseService):
             if isinstance(track, VideoTrack):
                 track.needs_ccextractor_first = True
             if isinstance(track, AudioTrack):
-                bitrate = None
-                                       
-                # Method 1: Search pattern 'gr' in URI
                 listel = track.extra.uri.split("/")
                 for i in listel:
                     if 'gr' in i:
@@ -255,55 +226,17 @@ class iTunes(BaseService):
                             if 'gr' in j:
                                 if "." in j:
                                     b1 = (j.split(".")[0][2:])
-                                    numbers = re.findall(r"\d+", b1)
-                                    if numbers:
-                                        bitrate = int(numbers[0])
+                                    bitrate = int(re.findall("\d+", b1)[0])
+                                    # print(bitrate)
                                 else:
                                     b1 = (j[2:])
-                                    numbers = re.findall(r"\d+", b1)
-                                    if numbers:
-                                        bitrate = int(numbers[0])
-                                break
-                    if bitrate:
-                        break
-                
-                # Method 4: Search in group_id and find the number or use defaults
-                if not bitrate:
-                    group_id_desc = track.extra.group_id
-                    #print(group_id_desc)
-                    if 'stereo' in group_id_desc:
-                        uri_numbers = re.findall(r'(\d{2,4})', track.extra.group_id)
-                        if uri_numbers:
-                        # Take the first number that looks like a valid bitrate (between 64 and 9999)
-                            for num_str in uri_numbers:
-                                num = int(num_str)
-                                if 64 <= num <= 9999:
-                                    bitrate = num
-                                    break                    
-                    elif 'he-aac' in group_id_desc or 'aac-he' in group_id_desc:
-                        bitrate = 128  # HE-AAC typical 128k
-                    elif 'aac' in group_id_desc:
-                        bitrate = 256  # AAC stereo typical 256k
-                    elif 'ac3' in group_id_desc or 'ac-3' in group_id_desc:
-                        bitrate = 384  # AC3 typical 640k
-                    elif 'ec3' in group_id_desc or 'ec-3' in group_id_desc or 'eac3' in group_id_desc:
-                        bitrate = 384  # EAC3 typical 768k
-                    elif 'atmos' in group_id_desc:
-                        bitrate = 768  # Atmos typical 768k
-                    else:
-                        bitrate = 128  # Fallback if failed
-                        self.log.warning(f"Could not determine bitrate for track {track.id}, using {bitrate}k by default")
-
-                
-                # Apply bitrate found
+                                    bitrate = int(re.findall("\d+", b1)[0])
+                                    # print(bitrate)
                 if bitrate:
-                    # Convert to bps (bits per second)
-                    track.bitrate = bitrate * 1000  # e.g. 128->128,000, 448->448,000
-                    self.log.debug(f"Bitrate assigned for track {track.id}: {bitrate}k")
+                    track.bitrate = bitrate * 1000  # e.g. 128->128,000, 2448->448,000
                 else:
-                    # This should never happen with fallbacks.
-                    track.bitrate = 128000  # Fallback final
-                    self.log.warning(f"Using emergency bitrate for track {track.id}: 128k")
+                    # continue
+                    raise ValueError(f"Unable to get a bitrate value for Track {track.id}")
                 track.codec = track.codec.replace("_ak", "").replace("_ap3", "").replace("_vod", "")
                 track.encrypted = True
             if isinstance(track, VideoTrack):
@@ -432,7 +365,7 @@ class iTunes(BaseService):
         try:
             self.session.headers.update({
                 "User-Agent": self.config["user_agent"],
-                "Authorization": f"Bearer {environment['developerToken']}",
+                "Authorization": f"Bearer {environment['MEDIA_API']['token']}",
                 "media-user-token": self.session.cookies.get_dict()["media-user-token"],
                 "x-apple-music-user-token": self.session.cookies.get_dict()["media-user-token"]
             })
@@ -443,21 +376,12 @@ class iTunes(BaseService):
 
 
     def get_environment_config(self):
-        """Loads environment config data from WEB App's serialized server data."""
+        """Loads environment config data from WEB App's <meta> tag."""
         res = self.session.get("https://tv.apple.com").text
-        
-        script_match = re.search(r'<script[^>]*id=["\']serialized-server-data["\'][^>]*>(.*?)</script>', res, re.DOTALL)
-        if script_match:
-            try:
-                script_content = script_match.group(1).strip()
-                # Parse the JSON array
-                data = json.loads(script_content)
-                if data and len(data) > 0 and 'data' in data[0] and 'configureParams' in data[0]['data']:
-                    return data[0]['data']['configureParams']
-            except (json.JSONDecodeError, KeyError, IndexError) as e:
-                print(f"Failed to parse serialized server data: {e}")
-        
-        return None
+        env = re.search(r'web-tv-app/config/environment"[\s\S]*?content="([^"]+)', res)
+        if not env:
+            return None
+        return json.loads(unquote(env[1]))
 
 
 class ResponseCode(Enum):
@@ -465,3 +389,4 @@ class ResponseCode(Enum):
     INVALID_PSSH = -1001
     NOT_OWNED = -1002  # Title not owned in the requested quality
     INSUFFICIENT_SECURITY = -1021  # L1 required or the key used is revoked
+
