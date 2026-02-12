@@ -2,8 +2,8 @@
 
 import argparse
 
-from vinetrimmer.utils.widevine.device import LocalDevice
-from vinetrimmer.utils.widevine.protos.widevine_pb2 import ClientIdentification
+from fuckdl.utils.widevine.device import LocalDevice
+from fuckdl.utils.widevine.protos.widevine_pb2 import ClientIdentification
 
 parser = argparse.ArgumentParser(
     "Client identification parser",

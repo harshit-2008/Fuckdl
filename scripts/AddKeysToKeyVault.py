@@ -5,7 +5,7 @@ import re
 import sqlite3
 import sys
 
-from vinetrimmer.utils.AtomicSQL import AtomicSQL
+from fuckdl.utils.AtomicSQL import AtomicSQL
 
 """
 Add keys to key vault. File should have one KID:KEY per-line.

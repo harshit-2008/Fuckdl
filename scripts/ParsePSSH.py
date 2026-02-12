@@ -3,8 +3,8 @@
 import argparse
 import base64
 
-from vinetrimmer.utils.widevine.protos.widevine_pb2 import WidevineCencHeader
-from vinetrimmer.vendor.pymp4.parser import Box
+from fuckdl.utils.widevine.protos.widevine_pb2 import WidevineCencHeader
+from fuckdl.vendor.pymp4.parser import Box
 
 parser = argparse.ArgumentParser(
     "PSSH parser",

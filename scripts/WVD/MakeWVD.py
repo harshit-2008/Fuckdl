@@ -6,7 +6,7 @@ import os
 import re
 import sys
 
-from vinetrimmer.utils.widevine.device import LocalDevice
+from fuckdl.utils.widevine.device import LocalDevice
 
 """
 Code to convert common folder/file structure to a vinetrimmer WVD.

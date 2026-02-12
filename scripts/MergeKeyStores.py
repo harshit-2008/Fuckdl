@@ -4,7 +4,7 @@ import argparse
 import json
 import sqlite3
 
-from vinetrimmer.utils.AtomicSQL import AtomicSQL
+from fuckdl.utils.AtomicSQL import AtomicSQL
 
 parser = argparse.ArgumentParser(
     "Key Store DB merger",
